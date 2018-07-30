@@ -1,5 +1,6 @@
 (ns twenty-eight.core
   (:require [clojure.spec.alpha :as s]
+            [clojure.core.async :refer [chan <!! >!! go <!]]
             [clojure.spec.gen.alpha :as gen]))
 
 (def suit? #{:club :diamond :heart :spade})
@@ -33,7 +34,8 @@
 
 (s/def ::name string?)
 (s/def ::score int?)
-(s/def ::player (s/keys :req [::name ::score ::hand]))
+(s/def ::action any?)
+(s/def ::player (s/keys :req [::name ::score ::hand ::action]))
 
 (s/def ::players (s/* ::player))
 (s/def ::game (s/keys :req [::players ::deck]))
@@ -44,6 +46,7 @@
 (def players (for [p (range 0 4)]
                {::name (str "player-" p)
                 ::score 0
+                ::action (chan 1) 
                 ::hand []}))
 
 (defn deal-cards [{:keys [::players ::deck]}]
@@ -65,3 +68,27 @@
 
 (defn redeal-possible? [{:keys [::players]}]
   (-> players first ::hand no-points-card?))
+
+(defn ask-for-redeal? [{:keys [::players]}]
+  (println "Asking for redeal..")
+  (-> players
+     first
+     ::action 
+     <!!))
+
+(defn start-bidding [game]
+  (println "Now, let's start bidding"))
+
+(defn deal-hand []
+  (let [game  (initial-draw)]
+    (def game game)
+    (when (and (redeal-possible? game)
+             (ask-for-redeal? game))
+      (println "Dealing hand")
+      (deal-hand))
+    (start-bidding game)))
+
+;; todo encode and verify possible states through spec
+#_(-> game ::players first ::action (>!! false))
+
+#_(go (deal-hand))
