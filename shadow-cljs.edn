@@ -1,0 +1,23 @@
+;; shadow-cljs configuration
+{:nrepl {:port 55001}
+ :http {:port 9071
+        :host "0.0.0.0"}
+
+ :deps true
+ :builds {:app {:target :browser
+                :output-dir "resources/public/js"
+                :asset-path "/js"
+                :dev {:compiler-options {:optimizations :none
+                                         :closure-defines      {"re_frame.trace.trace_enabled_QMARK_" true}
+                                         :preloads             [day8.re-frame-10x.preload]}}
+                :main shakdwipeea.twenty-eight.app/main
+                :devtools   {:after-load   shakdwipeea.twenty-eight.app/main
+                             :preloads     [devtools.preload
+                                            day8.re-frame-10x.preload]}
+                :modules
+                {:app
+                 {:entries [shakdwipeea.twenty-eight.app]}}}
+          :test {:target :node-test
+                 :output-to "target/node-test.js"
+                 :ns-regexp "-test$"
+                 :autorun true}}}

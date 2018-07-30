@@ -1,0 +1,29 @@
+# Javascript Node CircleCI 2.0 configuration file
+#
+# Check https://circleci.com/docs/2.0/language-javascript/ for more details
+#
+version: 2
+jobs:
+  build:
+    working_directory: ~/twenty-eight
+    docker:
+      # specify the version you desire here
+      # - image: shakdwipeea/clj-node-build
+        - image: circleci/clojure:tools-deps-node
+    environment:
+      JVM_OPTS: -Xmx3200m
+      # Specify service dependencies here if necessary
+      # CircleCI maintains a library of pre-built images
+      # documented at https://circleci.com/docs/2.0/circleci-images/
+      # - image: circleci/mongo:3.4.4
+    steps:
+      - checkout
+      - restore_cache:
+            key: twenty-eight-{{checksum "deps.edn"}}}
+      - run: sudo npm i -g shadow-cljs
+      - run: sudo npm i
+      - run: clj -Atest
+      - save_cache:
+          paths:
+            - /root/.m2
+          key: twenty-eight-{{checksum "deps.edn"}}

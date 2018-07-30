@@ -1,0 +1,22 @@
+{:paths ["resources" "src" "dev"]
+ :deps {org.clojure/clojure {:mvn/version "RELEASE"}
+        snow {:mvn/version "0.3.6"}
+        metosin/ring-http-response {:mvn/version "0.9.0"} 
+        thheller/shadow-cljs {:mvn/version "2.3.18"}
+        hiccup {:mvn/version "1.0.5"}
+        expound {:mvn/version "0.7.1"}
+        reagent {:mvn/version "0.8.0-alpha2"}
+        stylefy {:mvn/version "1.7.0"}
+        org.clojure/clojurescript {:mvn/version "1.10.238"}
+        re-frame {:mvn/version "0.10.6-SNAPSHOT"}}
+ :mvn/repos {"jboss" {:url "https://repository.jboss.org/nexus/content/groups/public/"}
+             "jitpack" {:url "https://jitpack.io"}} 
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps {org.clojure/test.check {:mvn/version "RELEASE"}}}
+  :runner
+  {:extra-deps {com.cognitect/test-runner
+                {:git/url "https://github.com/cognitect-labs/test-runner"
+                 :sha "76568540e7f40268ad2b646110f237a60295fa3c"}}
+   :main-opts ["-m" "cognitect.test-runner"
+               "-d" "test"]}}}
