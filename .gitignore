@@ -21,3 +21,5 @@ package-lock.json
 profiles.edn
 package-lock.json
 cljs-test-runner-out
+.stack-work/
+twenty-eight.cabal
