@@ -1,12 +1,15 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NamedFieldPuns #-}
 
-module Lib
-    ( someFunc
-    ) where
+module Lib where
 
 import Control.Concurrent.STM
 import Control.Monad
+import Control.Monad.State
 import Control.Concurrent.STM.TChan
+import Control.Concurrent
+import System.Random.Shuffle
+import Control.Monad.Random.Lazy
 
 data Suit = Club
           | Diamond
@@ -61,12 +64,12 @@ data DealerMessage = MRedealQ RedealMsg
 data Player = Player {name :: String
                      ,score :: Int
                      ,hand :: Deck
-                     ,writeChan :: TChan PlayerMessage
-                     ,readChan :: TChan DealerMessage}
+                     ,pChan :: TChan PlayerMessage
+                     ,dChan :: TChan DealerMessage}
             deriving (Eq, Show)
 
 instance Show (TChan c)  where
-  show c = "A channel " ++ show c
+  show c = ""
 
 data Game = Game {players :: [Player]
                  ,deck :: Deck}
@@ -74,20 +77,20 @@ data Game = Game {players :: [Player]
 
 type Name = String
 
-mkPlayer :: Name -> IO Player
+mkPlayer :: Name -> STM Player
 mkPlayer n = do
-  writeChan <- atomically $ newTChan
-  readChan <- atomically $ newTChan
+  writeChan <- newTChan
+  readChan <- newTChan
   return Player {name = n
                 ,score = 0
                 ,hand = []
-                ,writeChan = writeChan
-                ,readChan = readChan}
+                ,pChan = writeChan
+                ,dChan = readChan}
 
-genTestPlayers :: IO [Player]
+genTestPlayers :: STM [Player]
 genTestPlayers = mapM (\i -> mkPlayer $ "player-" ++ show i) [1 .. 4]
 
-mkGame :: IO Game
+mkGame :: STM Game
 mkGame = fmap (\p -> Game {players = p, deck = getPlayableCards})  genTestPlayers
 
 distribute :: Player -> Card -> Player
@@ -104,9 +107,49 @@ isRedealPossible (Game {players, deck}) = any hasPoints $ (hand . head) players
   where
     hasPoints (Card {points}) = (p points) > 0
 
+type GameState  = StateT Game STM
 
--- startGame :: Game
--- startGame = let game = dealCards mkGame in
+playerLoop :: Player -> STM ()
+playerLoop (Player {pChan, dChan}) = do
+  dMsg <- readTChan dChan
+  case dMsg of
+    MRedealQ WantRedeal -> writeTChan pChan (MRedeal Redeal)
+
+askForRedeal :: GameState ()
+askForRedeal = do
+  game <- get
+  let fPlayer =  head $ players game 
+  lift $ writeTChan (dChan fPlayer) (MRedealQ WantRedeal)
+  lift $ playerLoop fPlayer
+  playerAnswer <- lift $ readTChan (pChan fPlayer)
+  return ()
+
+
+startGame :: GameState ()
+startGame = do
+  modify dealCards
+  g <- get
+  when (isRedealPossible g) askForRedeal
+
+
+shuffleDeck :: Game -> IO Game
+shuffleDeck g@(Game {deck}) = evalRandIO $ do
+  d' <- shuffleM deck
+  return g {deck =  d'}
+
+gameSequence :: GameState ()
+gameSequence =
+  startGame >> askForRedeal >> return ()
+
+-- STM Game
+
+-- StateT Game STM
+
+main :: IO ()
+main = atomically mkGame >>= shuffleDeck >>= runGame >>= (putStrLn . show)
+  where
+    runGame :: Game -> IO Game
+    runGame g = do
+      (_, g') <- atomically $ runStateT gameSequence g
+      return g'
   
-someFunc :: IO ()
-someFunc = putStrLn "Hello there!!"
