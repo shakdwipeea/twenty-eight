@@ -11,6 +11,8 @@ import Control.Concurrent
 import System.Random.Shuffle
 import Control.Monad.Random.Lazy
 
+import qualified Network.WebSockets as WS
+
 data Suit = Club
           | Diamond
           | Heart
@@ -70,6 +72,7 @@ data Player = Player {name :: String
 
 instance Show (TChan c)  where
   show c = ""
+
 
 data Game = Game {players :: [Player]
                  ,deck :: Deck}
@@ -144,6 +147,14 @@ gameSequence =
 -- STM Game
 
 -- StateT Game STM
+
+socketApi :: WS.ServerApp
+socketApi pending = do
+  conn <- WS.acceptRequest pending
+  WS.forkPingThread conn 30
+
+runWebSockets :: IO ()
+runWebSockets = WS.runServer "0.0.0.0" 9200 socketApi 
 
 main :: IO ()
 main = atomically mkGame >>= shuffleDeck >>= runGame >>= (putStrLn . show)
