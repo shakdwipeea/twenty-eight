@@ -1,17 +1,17 @@
 (ns user
   (:require [clojure.spec.alpha :as s]
             [snow.repl :as repl]
-            [snow.env :refer [read-edn]]
             [shakdwipeea.twenty-eight.app :refer [system-config]]
             [cider.nrepl :refer [cider-nrepl-handler]]
             [clojure.tools.nrepl.server :as nrepl]
             [shadow.cljs.devtools.server :as server]
-            [shadow.cljs.devtools.api :as shadow]))
+            [shadow.cljs.devtools.api :as shadow]
+            [eftest.runner :refer [find-tests run-tests]]))
 
 (s/check-asserts true)
 
-#_(do (require '[expound.alpha :as expound])
-      (set! s/*explain-out* expound/printer))
+(do (require '[expound.alpha :as expound])
+    (alter-var-root #'s/*explain-out* (constantly expound/printer)))
 
 
 (defn cljs-repl []
@@ -33,10 +33,16 @@
 
 #_(shadow/release :app)
 
+#_("test"
+   find-tests
+   run-tests)
+
+#_(run-tests (find-tests "test"))
+
 (defn -main [& args]
   (println "Starting twenty-eight systems...")
   (repl/start! system-config)
   (repl/start-nrepl)
   (println "nrepl started")
-  (server/start!)
-  (shadow/dev :app))
+  #_(server/start!)
+  #_(shadow/dev :app))

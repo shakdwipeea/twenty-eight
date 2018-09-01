@@ -45,6 +45,7 @@
    ::comm/comm (comm/new-comm comm/event-msg-handler
                               comm/broadcast
                               request-handler)
-   ::server (component/using (new-immutant-web :port (system/get-port config :http-port))
+   ::server (component/using (new-immutant-web :port (or (system/get-port config :http-port)
+                                                        7700))
                              [::handler])])
 
