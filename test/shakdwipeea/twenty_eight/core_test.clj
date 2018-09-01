@@ -9,13 +9,18 @@
     (is (true? (>!! test-ch :diamond)))))
 
 (defn run-player1 [{:keys [::c/player-chan ::c/game-chan]}]
-  (async/go-loop [a true]
-    (case (<! game-chan)
-      :want-redeal (>! player-chan false))))
+  (go (while true
+        (case (<! game-chan)
+          :want-redeal (>! player-chan false)))))
+
+(defn state-listener []
+  (->> (c/notify-game-state-change)
+     (map #(println "State now is " %))))
 
 (deftest play-game
   (println "We're gonna play games")
   (c/deal-hand)
-  (go (c/run-game))
-  (go (run-player1 (c/cur-game))) 
+  (go (c/run-game (c/cur-game)))
+  (run-player1 (-> (c/cur-game) ::c/players first))
+  (state-listener)
   (is (= 1 1)))

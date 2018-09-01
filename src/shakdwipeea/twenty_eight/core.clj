@@ -117,6 +117,20 @@
   [new-state]
   (swap-game! #(assoc % ::game-state new-state)))
 
+(ds/defn-spec notify-game-change
+  {:s/ret chan?}
+  []
+  (let [ch (chan-of ::game 10)]
+    (add-watch *game* :watcher (fn [key atom old-state new-state]
+                                 (>!! ch new-state)))
+    ch))
+
+(ds/defn-spec notify-game-state-change
+  {:s/ret chan?}
+  []
+  (->> (notify-game-change)
+     (map ::game-state)))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Game transition functions ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
