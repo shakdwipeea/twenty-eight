@@ -44,5 +44,6 @@
   (repl/start! system-config)
   (repl/start-nrepl)
   (println "nrepl started")
+  (run-tests (find-tests "test"))
   #_(server/start!)
   #_(shadow/dev :app))
