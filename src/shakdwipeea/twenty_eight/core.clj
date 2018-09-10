@@ -94,8 +94,10 @@
 (s/def ::game-state #{::started ::asking-for-redeal ::bidding})
 
 ;; bid starts from 16 and game has a max of 28 points
-(s/def ::bid-value (s/and int?
-                          #(<= 16 % 28)))
+;; or you can just pass
+(s/def ::bid-value (s/or :bid (s/and int?
+                                     #(<= 16 % 28))
+                         :pass #{:pass}))
 
 (s/def ::game (s/keys :req [::players ::deck ::game-state]
                       :opt [::bid-value]))
@@ -111,40 +113,27 @@
                 ::game-chan (chan-of ::game-ctrl-msg 1)
                 ::hand []}))
 
-(def *game* (atom {}))
-
-(ds/defn-spec set-game!
-  {::s/args (s/cat :game ::game)}
-  [game]
-  (reset! *game* game))
-
 (defn swap-game!
-  [f]
-  (swap! *game* f))
+  [game f]
+  (swap! game f))
 
-(ds/defn-spec cur-game {:s/ret ::game} [] @*game*)
-
-(ds/defn-spec change-game-state!
-  {::s/args (s/cat :new-state ::game-state)
-   :s/ret ::game}
-  [new-state]
-  (swap-game! #(assoc % ::game-state new-state)))
-
-(def game-updates (chan-of ::game 10))
+(ds/defn-spec change-game-state! 
+  [game new-state]
+  (swap-game! game #(assoc % ::game-state new-state)))
 
 (ds/defn-spec <notify-game-change
   {:s/ret chan?}
-  []
+  [game]
   (let [ch (chan 10)]
-    (add-watch *game* :watcher (fn [key atom old-state new-state]
-                                 (println "State changed")
-                                 (>!! ch new-state)))
+    (add-watch game :watcher (fn [key atom old-state new-state]
+                               (println "State changed")
+                               (>!! ch new-state)))
     ch))
 
-(ds/defn-spec notify-game-state-change
+(ds/defn-spec <notify-game-state-change
   {:s/ret chan?}
-  []
-  (pipe-trans (<notify-game-change) (map ::game-state)))
+  [game]
+  (pipe-trans (<notify-game-change game) (map ::game-state)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -169,6 +158,7 @@
             (deal-cards g))
           {::players players
            ::game-state ::started
+           ::bid-value 16
            ::deck (shuffle deck)} (range 0 4)))
 
 ;;;;;;;;;;;;;;;;;;;;
@@ -208,7 +198,9 @@
   {::s/args (s/cat :player ::player)
    :s/ret ::bid-value}
   [{:keys [::game-chan ::player-chan]}]
+  (println "will ask for bid ")
   (>!! game-chan :bid)
+  (println "Will now wait for bids to come")
   (-> player-chan <!! ::bid-value))
 
 (ds/defn-spec perform-bid
@@ -219,59 +211,52 @@
   (case (<!! game-chan)
     :bid (>!! player-chan bid-value)))
 
-(ds/defn-spec start-bidding
-  {::s/args (s/cat :game ::game)
-   ::s/ret ::game} 
-  [{players ::players :as g}]
-  (->> players
-     (map receive-bid)
-     (map #(println "Bid values are " %))
-     doall)
-  g)
+(defn update-bid
+  {::s/args (s/cat :new-bid ::bid-value)}
+  [new-bid g]
+  (println "new bid is " new-bid)
+  (cond-> g
+    (not= new-bid :pass) (assoc ::bid-value new-bid)))
 
-(defn deal-hand []
-  (set-game! (initial-draw)))
+(defn update-game-with-bid!
+  [<game> new-bid]
+  (println "new-bid was made for " new-bid)
+  (swap-game! <game> (partial update-bid new-bid)))
 
-(ds/defn-spec run-game
-  {::s/args (s/cat :intial-game ::game)}
-  [initial-game]
+(defn start-bidding! [<game>] 
+  (let [{players ::players cur-bid ::bid-value :as g} @<game>
+        g'  (->> players
+               (map receive-bid)
+               (map (partial update-game-with-bid! <game>))
+               last)
+        new-bid (-> g' ::bid-value)]
+    (println "new bid value for this round " new-bid)
+    (if (or (>= new-bid 28)
+           (= new-bid cur-bid))
+      (reset! <game> g')
+      (recur <game>))))
+
+(defn deal-hand! [game]
+  (reset! game (initial-draw)))
+
+(defn run-game [game]
   (println "Starting to run game")
-  (when (and (redeal-possible? initial-game)
-           (do (change-game-state! ::asking-for-redeal)
-               (ask-for-redeal? initial-game)))
-    (println "Dealing hand")
-    (deal-hand))
-  (println "Now, let's start bidding")
-  (change-game-state! ::bidding)
-  (start-bidding (cur-game)))
+  (dosync (when (and (redeal-possible? @game)
+                   (do (change-game-state! game ::asking-for-redeal)
+                       (ask-for-redeal? @game)))
+            (println "Dealing hand again")
+            (deal-hand! game))
+          (println "Now, let's start bidding")
+          (change-game-state! game ::bidding)
+          (start-bidding! game)
+          (println "Final bid is " (-> @game ::bid-value))))
 
+(defn init-game [game]
+  (deal-hand! game))
 
 ;; todo encode and verify possible states through spec
 #_(-> game ::players first ::action (>!! false))
 
 #_(go (deal-hand))
-
-;; (defn chooser
-;;   [[first-choice second-choice & unimportant-choices]]
-;;   (println (str "Your first choice is: " first-choice))
-;;   (println (str "Your second choice is: " second-choice))
-;;   (println (str "We're ignoring the rest of your choices. "
-;;                 "Here they are in case you need to cry over them: "
-;;                 (clojure.string/join ", " unimportant-choices))))
-;; (chooser ["Marmalade", "Handsome Jack", "Pigpen", "Aquaman"])
-
-;; (def test-a (atom 0))
-
-;; (add-watch test-a :test-me (fn [key atom old-state new-state]
-;;                              (prn "-- Atom Changed --")
-;;                              (prn "key" key)
-;;                              (prn "atom" atom)
-;;                              (prn "old-state" old-state)
-;;                              (prn "new-state" new-state)))
-
-;; (reset! test-a {:abc "world"
-;;                 :def "go-now"})
-
-;; (swap! test-a #(assoc % :def "why"))
 
 #_(go (println "as"))
