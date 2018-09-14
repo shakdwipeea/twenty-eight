@@ -1,6 +1,7 @@
 (ns shakdwipeea.twenty-eight.core
   (:require [clojure.spec.alpha :as s]
             [clojure.core.async :refer [chan <!! >!! go <!] :as a]
+            [special.core :refer [condition manage]]
             [defn-spec.core :as ds]
             [clojure.core.async.impl.protocols :as ap] 
             [clojure.spec.gen.alpha :as gen])
@@ -78,7 +79,8 @@
 (s/def ::score int?)
 
 ;; possible msgs sent from game
-(s/def ::game-ctrl-msg #{:want-redeal :bid})
+(s/def ::game-ctrl-msg (s/or :redeal-msg #{:want-redeal}
+                             :bid-msg (s/tuple #{:bid} ::bid-value)))
 
 ;; possible replies sent by the player
 (s/def ::player-reply-msg (s/or :redeal-reply boolean?
@@ -91,7 +93,7 @@
 (s/def ::player (s/keys :req [::name ::score ::hand ::game-chan ::player-chan]))
 
 (s/def ::players (s/* ::player))
-(s/def ::game-state #{::started ::asking-for-redeal ::bidding})
+(s/def ::game-state #{::started ::asking-for-redeal ::bidding ::choose-trump})
 
 ;; bid starts from 16 and game has a max of 28 points
 ;; or you can just pass
@@ -99,8 +101,13 @@
                                      #(<= 16 % 28))
                          :pass #{:pass}))
 
-(s/def ::game (s/keys :req [::players ::deck ::game-state]
-                      :opt [::bid-value]))
+;; to track who bid last we store the name for now
+(s/def ::last-bidder ::name)
+
+(s/def ::new-bid (s/keys :req [::bid-value ::last-bidder]))
+
+(s/def ::game (s/and (s/keys :req [::players ::deck ::game-state]
+                             :opt [::bid-value ::last-bidder])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Game state mgmt functions ;;
@@ -122,7 +129,7 @@
   (swap-game! game #(assoc % ::game-state new-state)))
 
 (ds/defn-spec <notify-game-change
-  {:s/ret chan?}
+  {::s/ret chan?}
   [game]
   (let [ch (chan 10)]
     (add-watch game :watcher (fn [key atom old-state new-state]
@@ -131,7 +138,7 @@
     ch))
 
 (ds/defn-spec <notify-game-state-change
-  {:s/ret chan?}
+  {::s/ret chan?}
   [game]
   (pipe-trans (<notify-game-change game) (map ::game-state)))
 
@@ -183,7 +190,7 @@
     (>!! game-chan :want-redeal)
     (<!! player-chan)))
 
-(ds/defn-spec reply-for-redeal
+(ds/defn-spec reply-for-redeal!
   {::s/args (s/cat :player ::players
                    :action boolean?)}
   [{player-chan ::player-chan} action]
@@ -195,30 +202,33 @@
 
 (ds/defn-spec receive-bid
   "Ask for bid to player and receive the value"
-  {::s/args (s/cat :player ::player)
-   :s/ret ::bid-value}
-  [{:keys [::game-chan ::player-chan]}]
-  (println "will ask for bid ")
-  (>!! game-chan :bid)
-  (println "Will now wait for bids to come")
-  (-> player-chan <!! ::bid-value))
-
-(ds/defn-spec perform-bid
-  "When asked about bid it will perform-bid with given value"
   {::s/args (s/cat :bid-value ::bid-value
-                   :player ::player)}
-  [bid-value {:keys [::game-chan ::player-chan]}]
-  (case (<!! game-chan)
-    :bid (>!! player-chan bid-value)))
+                   :player ::player)
+   :s/ret ::new-bid}
+  [bid-value {:keys [::game-chan ::player-chan ::name]}]
+  (println "will ask for bid ")
+  (>!! game-chan [:bid bid-value])
+  (println "Will now wait for bids to come")
+  (assoc (<!! player-chan) ::last-bidder name))
+
+(defn bid-valid? [bid {:keys [::bid-value]}]
+  (< bid-value bid))
+
+(ds/defn-spec perform-bid!
+  {::s/args (s/cat :player ::player
+                   :bid-value ::bid-value)}
+  [{:keys [::player-chan]} bid-value]
+  (>!! player-chan {::bid-value bid-value}))
 
 (defn update-bid
-  {::s/args (s/cat :new-bid ::bid-value)}
-  [new-bid g]
-  (println "new bid is " new-bid)
-  (cond-> g
-    (not= new-bid :pass) (assoc ::bid-value new-bid)))
+  {::s/args (s/cat :new-bid ::new-bid
+                   :game ::game)}
+  [{:keys [::bid-value ::last-bidder] :as new-bid} game] 
+  (cond-> game
+    (not= bid-value :pass) (assoc ::bid-value bid-value
+                               ::last-bidder last-bidder)))
 
-(defn update-game-with-bid!
+(ds/defn-spec update-game-with-bid!
   [<game> new-bid]
   (println "new-bid was made for " new-bid)
   (swap-game! <game> (partial update-bid new-bid)))
@@ -226,7 +236,7 @@
 (defn start-bidding! [<game>] 
   (let [{players ::players cur-bid ::bid-value :as g} @<game>
         g'  (->> players
-               (map receive-bid)
+               (map (partial receive-bid cur-bid))
                (map (partial update-game-with-bid! <game>))
                last)
         new-bid (-> g' ::bid-value)]
@@ -249,6 +259,7 @@
           (println "Now, let's start bidding")
           (change-game-state! game ::bidding)
           (start-bidding! game)
+          (change-game-state! game ::choose-trump)
           (println "Final bid is " (-> @game ::bid-value))))
 
 (defn init-game [game]

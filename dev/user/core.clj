@@ -2,6 +2,7 @@
   (:require [clojure.spec.alpha :as s]
             [snow.repl :as repl]
             [shakdwipeea.twenty-eight.app :refer [system-config]]
+            [cognitect.transcriptor :as xr :refer (check!)]
             [eftest.runner :refer [find-tests run-tests]]))
 
 #_(s/check-asserts true)
@@ -36,6 +37,5 @@
   (repl/start! system-config)
   (repl/start-nrepl)
   (println "nrepl started")
-  (run-tests (find-tests "test"))
   #_(server/start!)
   #_(shadow/dev :app))
