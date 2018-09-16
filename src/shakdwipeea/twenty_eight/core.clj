@@ -1,6 +1,7 @@
 (ns shakdwipeea.twenty-eight.core
   (:require [clojure.spec.alpha :as s]
             [clojure.core.async :refer [chan <!! >!! go <!] :as a]
+            [snow.util :as u]
             [special.core :refer [condition manage]]
             [defn-spec.core :as ds]
             [clojure.core.async.impl.protocols :as ap] 
@@ -80,11 +81,13 @@
 
 ;; possible msgs sent from game
 (s/def ::game-ctrl-msg (s/or :redeal-msg #{:want-redeal}
-                             :bid-msg (s/tuple #{:bid} ::bid-value)))
+                             :bid-msg (s/tuple #{:bid} ::bid-value)
+                             :choose-trump #{:choose-trump}))
 
 ;; possible replies sent by the player
 (s/def ::player-reply-msg (s/or :redeal-reply boolean?
-                                :bid-reply (s/keys :req [::bid-value])))
+                                :bid-reply (s/keys :req [::bid-value])
+                                :trump ::suit))
 
 ;; Channels for communication
 (s/def ::game-chan chan?)
@@ -106,8 +109,8 @@
 
 (s/def ::new-bid (s/keys :req [::bid-value ::last-bidder]))
 
-(s/def ::game (s/and (s/keys :req [::players ::deck ::game-state]
-                             :opt [::bid-value ::last-bidder])))
+(s/def ::game  (s/keys :req [::players ::deck ::game-state]
+                       :opt [::bid-value ::last-bidder ::trump]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Game state mgmt functions ;;
@@ -233,6 +236,16 @@
   (println "new-bid was made for " new-bid)
   (swap-game! <game> (partial update-bid new-bid)))
 
+
+(ds/defn-spec default-last-bidder
+  "if no one is last bidder then player 0 is"
+  {::s/args (s/cat :game ::game)
+   ::s/ret ::game}
+  [{:keys [::last-bidder] :as g}]
+  (cond-> g
+    (nil? last-bidder) (assoc ::last-bidder (-> g ::players first ::name))))
+
+
 (defn start-bidding! [<game>] 
   (let [{players ::players cur-bid ::bid-value :as g} @<game>
         g'  (->> players
@@ -243,11 +256,69 @@
     (println "new bid value for this round " new-bid)
     (if (or (>= new-bid 28)
            (= new-bid cur-bid))
-      (reset! <game> g')
+      (->> g' default-last-bidder (reset! <game>))
       (recur <game>))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Trump cards secret management ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(s/def ::trump-id string?)
+
+(s/def ::state (s/map-of ::trump-id ::suit))
+
+(def ^:dynamic *trump-store* (atom {}))
+
+(ds/defn-spec add-trump-suit
+  {::s/args (s/cat :suit ::suit)
+   ::s/ret ::trump-id}
+  [suit]
+  (let [uuid (u/uuid)]
+    (swap! *trump-store* #(assoc % uuid suit))
+    uuid))
+
+(ds/defn-spec get-trump-suit
+  {::s/args (s/cat :id ::trump-id)
+   ::s/ret ::suit}
+  [id]
+  (get @*trump-store* id))
+
+#_(assert (let [suit :diamond]
+            (= (get-trump-suit (add-trump-suit suit))
+               suit)))
+
+;;;;;;;;;;;;;;;;;;
+;; choose trump ;;
+;;;;;;;;;;;;;;;;;;
+
+(ds/defn-spec ask-for-trump
+  {::s/args (s/cat :player ::player)
+   ::s/ret ::suit}
+  [{:keys [::player-chan ::game-chan]}]
+  (>!! game-chan :choose-trump)
+  (<!! player-chan))
+
+(ds/defn-spec choose-trump
+  {::s/args (s/cat :game ::game)
+   ::s/ret ::suit}
+  [game]
+  (-> game ::players first ask-for-trump))
+
+(defn choose-trump! [<game>]
+  (let [suit (choose-trump @<game>)]
+    (swap! <game> assoc ::trump suit)))
+
+(ds/defn-spec player-choose-trump!
+  "client fn to choose trump"
+  {::s/args (s/cat :player ::player
+                   :suit ::suit)}
+  [{player-chan ::player-chan} suit]
+  (>!! player-chan suit))
+
 
 (defn deal-hand! [game]
   (reset! game (initial-draw)))
+
 
 (defn run-game [game]
   (println "Starting to run game")
@@ -259,8 +330,11 @@
           (println "Now, let's start bidding")
           (change-game-state! game ::bidding)
           (start-bidding! game)
+          (println "Final bid is " (-> @game ::bid-value))
           (change-game-state! game ::choose-trump)
-          (println "Final bid is " (-> @game ::bid-value))))
+          (println "Now the last bidder will choose a trump")
+          (choose-trump! game)
+          (println "Trump chosen is " (-> @game ::trump))))
 
 (defn init-game [game]
   (deal-hand! game))

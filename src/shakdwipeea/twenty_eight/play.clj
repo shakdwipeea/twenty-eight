@@ -57,7 +57,7 @@
 
 (def first-player (-> @game ::c/players first))
 
-#_(c/reply-for-redeal first-player false)
+#_(c/reply-for-redeal! first-player false)
 
 ;; perform bid for all
 #_(let [players (-> @game ::c/players)]
@@ -65,5 +65,12 @@
       (c/perform-bid! p :pass)))
 
 ;; choose trump now
+#_(go (c/choose-trump! game))
+
+#_(c/player-choose-trump! first-player :diamond)
 
 #_(-> @game ::c/game-state)
+
+#_(-> @game ::c/last-bidder)
+
+#_(-> @game ::c/trump)

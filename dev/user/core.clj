@@ -10,6 +10,8 @@
 #_(do (require '[expound.alpha :as expound])
       (alter-var-root #'s/*explain-out* (constantly expound/printer)))
 
+(set! s/*explain-out* expound/printer)
+
 
 (defn cljs-repl []
   (cemerick.piggieback/cljs-repl :app))
