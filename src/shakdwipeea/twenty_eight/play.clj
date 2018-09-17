@@ -51,14 +51,24 @@
   (echo-game @game)
   (async/thread (c/run-game game)))
 
+
+;; execute these statements to play the game .. for emacs C-c C-c
+
+;; defining a container to store the game state
 (def game (atom {}))
+
+;; Start playing the game
 
 #_(play-game game)
 
+;;[optional] execute this if you want to echo if any commands are being received by the players
 #_(go (echo-game game))
 
-(def first-player (-> @game ::c/players first))
+;; get hold of the first player .. so that we can answer any commands the game asks us
+;; eg. Do i want a redeal ?
+#_(def first-player (-> @game ::c/players first))
 
+;; If game asks for :want-redeal (monitor game state in repl) ..execute this to say no
 #_(c/reply-for-redeal! first-player false)
 
 ;; perform bid for all
@@ -66,15 +76,16 @@
     (for [p players]
       (c/perform-bid! p :pass)))
 
-;; choose trump now
-#_(go (c/choose-trump! game))
-
+;; choose a trump when asked about it
 #_(c/player-choose-trump! first-player :diamond)
 
+;; View game state
 #_(-> @game ::c/game-state)
 
+;; View who the last bidder was
 #_(-> @game ::c/last-bidder)
 
+;; View the current trump
 #_(-> @game ::c/trump)
 
 #_(c/get-player-by-name "player-0" @game)
