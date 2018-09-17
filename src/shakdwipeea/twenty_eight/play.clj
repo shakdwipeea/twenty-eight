@@ -55,6 +55,8 @@
 
 #_(play-game game)
 
+#_(go (echo-game game))
+
 (def first-player (-> @game ::c/players first))
 
 #_(c/reply-for-redeal! first-player false)
@@ -74,3 +76,5 @@
 #_(-> @game ::c/last-bidder)
 
 #_(-> @game ::c/trump)
+
+#_(c/get-player-by-name "player-0" @game)

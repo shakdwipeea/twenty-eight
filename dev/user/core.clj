@@ -8,9 +8,7 @@
 #_(s/check-asserts true)
 
 #_(do (require '[expound.alpha :as expound])
-      (alter-var-root #'s/*explain-out* (constantly expound/printer)))
-
-(set! s/*explain-out* expound/printer)
+      (set! s/*explain-out* expound/printer))
 
 
 (defn cljs-repl []

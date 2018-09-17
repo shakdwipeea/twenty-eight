@@ -1,6 +1,6 @@
 (ns shakdwipeea.twenty-eight.core
   (:require [clojure.spec.alpha :as s]
-            [clojure.core.async :refer [chan <!! >!! go <!] :as a]
+            [clojure.core.async :refer [chan <!! >!! go <! >!] :as a]
             [snow.util :as u]
             [special.core :refer [condition manage]]
             [defn-spec.core :as ds]
@@ -112,16 +112,27 @@
 (s/def ::game  (s/keys :req [::players ::deck ::game-state]
                        :opt [::bid-value ::last-bidder ::trump]))
 
+;;;;;;;;;;;;;
+;; Players ;;
+;;;;;;;;;;;;;
+
+(defn get-player-by-name [name game]
+  (->> game
+     ::players
+     (filter #(= (-> % ::name) name))
+     first))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Game state mgmt functions ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(def players (for [p (range 0 4)]
-               {::name (str "player-" p)
-                ::score 0
-                ::player-chan (chan-of ::player-reply-msg 1)
-                ::game-chan (chan-of ::game-ctrl-msg 1)
-                ::hand []}))
+(defn gen-players []
+  (for [p (range 0 4)]
+    {::name (str "player-" p)
+     ::score 0
+     ::player-chan (chan-of ::player-reply-msg 1)
+     ::game-chan (chan-of ::game-ctrl-msg 1)
+     ::hand []}))
 
 (defn swap-game!
   [game f]
@@ -161,16 +172,24 @@
                         deck)         
          ::deck (nthrest deck (count players))))
 
+(defn distribute-cards [num-cards game]
+  (reduce (fn [g i]
+            (deal-cards g)) 
+          game (range 0 num-cards)))
+
 (ds/defn-spec initial-draw
   {::s/ret ::game}
   []
-  (reduce (fn [g i]
-            (deal-cards g))
-          {::players players
-           ::game-state ::started
-           ::bid-value 16
-           ::deck (shuffle deck)} (range 0 4)))
+  (distribute-cards 4 {::players (gen-players)
+                       ::game-state ::started
+                       ::bid-value 16
+                       ::deck (shuffle deck)}))
 
+#_(initial-draw)
+
+#_(->> (initial-draw)
+       ::players
+       (map #(-> % ::hand count)))
 ;;;;;;;;;;;;;;;;;;;;
 ;; initial redeal ;;
 ;;;;;;;;;;;;;;;;;;;;
@@ -294,19 +313,23 @@
 (ds/defn-spec ask-for-trump
   {::s/args (s/cat :player ::player)
    ::s/ret ::suit}
-  [{:keys [::player-chan ::game-chan]}]
-  (>!! game-chan :choose-trump)
+  [{:keys [::player-chan ::game-chan ::name]}]
+  (println "Asking " name " for trump card.")
+  (go (>! game-chan :choose-trump))
   (<!! player-chan))
+
 
 (ds/defn-spec choose-trump
   {::s/args (s/cat :game ::game)
    ::s/ret ::suit}
   [game]
-  (-> game ::players first ask-for-trump))
+  (-> game ::last-bidder (get-player-by-name game) ask-for-trump))
+
 
 (defn choose-trump! [<game>]
   (let [suit (choose-trump @<game>)]
     (swap! <game> assoc ::trump suit)))
+
 
 (ds/defn-spec player-choose-trump!
   "client fn to choose trump"
@@ -334,7 +357,9 @@
           (change-game-state! game ::choose-trump)
           (println "Now the last bidder will choose a trump")
           (choose-trump! game)
-          (println "Trump chosen is " (-> @game ::trump))))
+          (println "Trump chosen is " (-> @game ::trump))
+          (swap! game (partial distribute-cards 4))
+          (println "okay " (->> @game ::players (map #(-> % ::hand count))))))
 
 (defn init-game [game]
   (deal-hand! game))
