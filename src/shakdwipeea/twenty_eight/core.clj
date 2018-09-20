@@ -2,12 +2,34 @@
   (:require [clojure.spec.alpha :as s]
             [clojure.core.async :refer [chan <!! >!! go <! >!] :as a]
             [snow.util :as u]
+            [taoensso.timbre :as timbre]
             [special.core :refer [condition manage]]
             [defn-spec.core :as ds]
-            [clojure.core.async.impl.protocols :as ap] 
+            [clojure.core.async.impl.protocols :as ap]
+            [taoensso.timbre.appenders.core :refer [println-appender]]
+            [failjure.core :as f]
             [clojure.spec.gen.alpha :as gen])
   (:import [clojure.core.async.impl.channels ManyToManyChannel]))
 
+;; logging setup
+(timbre/refer-timbre)
+
+(timbre/set-config!   {:level :debug  ; e/o #{:trace :debug :info :warn :error :fatal :report}
+
+                       ;; Control log filtering by namespaces/patterns. Useful for turning off
+                       ;; logging in noisy libraries, etc.:
+                       :ns-whitelist  [] #_["my-app.foo-ns"]
+                       :ns-blacklist  [] #_["taoensso.*"]
+
+                       :middleware [] ; (fns [data]) -> ?data, applied left->right
+
+                       :appenders
+                       {;; The standard println appender:
+                        :println (println-appender {:stream :auto})
+
+                        }})
+
+(info "Hi!!")
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; core.async with spec ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -35,6 +57,31 @@
 
 ;; (def c1 (chan))
 ;; (def c2 (pipe-trans c1 (filter even?)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Trump cards secret management ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(s/def ::trump-id string?)
+
+(s/def ::state (s/map-of ::trump-id ::suit))
+
+(def ^:dynamic *trump-store* (atom {}))
+
+(ds/defn-spec add-trump-suit
+  {::s/args (s/cat :suit ::suit)
+   ::s/ret ::trump-id}
+  [suit]
+  (let [uuid (u/uuid)]
+    (swap! *trump-store* #(assoc % uuid suit))
+    uuid))
+
+(ds/defn-spec get-trump-suit
+  {::s/args (s/cat :id ::trump-id)
+   ::s/ret ::suit}
+  [id]
+  (get @*trump-store* id))
+
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -79,15 +126,34 @@
 (s/def ::name string?)
 (s/def ::score int?)
 
+(s/def ::trump-suit ::suit)
+
+(s/def ::trump-ref-id #(-> % get-trump-suit some?))
+
+;; if trump is exposed then we can directly contain the trump suit
+;; o/w we store a reference id to the trump-suit-store atom defined above
+(defmulti trump-exposed ::trump-exposed)
+(defmethod trump-exposed true [_]
+  (s/keys :req [::trump-exposed ::trump-suit]))
+(defmethod trump-exposed false [_]
+  (s/keys :req [::trump-exposed ::trump-ref-id]))
+
+(s/def ::trump (s/multi-spec trump-exposed ::trump-exposed))
+
 ;; possible msgs sent from game
-(s/def ::game-ctrl-msg (s/or :redeal-msg #{:want-redeal}
+(s/def ::game-ctrl-msg (s/or :commands #{:choose-trump :want-redeal :invalid-card}
+                             :redeal-msg #{:want-redeal}
                              :bid-msg (s/tuple #{:bid} ::bid-value)
-                             :choose-trump #{:choose-trump}))
+                             :choose-trump #{}
+                             :play-trick (s/tuple #{:play-trick}
+                                                  (s/keys :req [::trump]
+                                                          :opt [::game-stage ::suit-led]))))
 
 ;; possible replies sent by the player
 (s/def ::player-reply-msg (s/or :redeal-reply boolean?
                                 :bid-reply (s/keys :req [::bid-value])
-                                :trump ::suit))
+                                :trump ::suit
+                                :trick ::card))
 
 ;; Channels for communication
 (s/def ::game-chan chan?)
@@ -96,6 +162,13 @@
 (s/def ::player (s/keys :req [::name ::score ::hand ::game-chan ::player-chan]))
 
 (s/def ::players (s/* ::player))
+
+;; current board on which cards are being played
+(s/def ::game-stage (s/* ::card))
+
+;; suit currently being led
+(s/def ::suit-led ::suit)
+
 (s/def ::game-state #{::started ::asking-for-redeal ::bidding ::choose-trump})
 
 ;; bid starts from 16 and game has a max of 28 points
@@ -110,7 +183,7 @@
 (s/def ::new-bid (s/keys :req [::bid-value ::last-bidder]))
 
 (s/def ::game  (s/keys :req [::players ::deck ::game-state]
-                       :opt [::bid-value ::last-bidder ::trump]))
+                       :opt [::bid-value ::last-bidder ::trump ::game-stage ::suit-led]))
 
 ;;;;;;;;;;;;;
 ;; Players ;;
@@ -147,7 +220,7 @@
   [game]
   (let [ch (chan 10)]
     (add-watch game :watcher (fn [key atom old-state new-state]
-                               (println "State changed")
+                               (info "State changed")
                                (>!! ch new-state)))
     ch))
 
@@ -228,9 +301,9 @@
                    :player ::player)
    :s/ret ::new-bid}
   [bid-value {:keys [::game-chan ::player-chan ::name]}]
-  (println "will ask for bid ")
+  (info "will ask for bid ")
   (>!! game-chan [:bid bid-value])
-  (println "Will now wait for bids to come")
+  (info "Will now wait for bids to come")
   (assoc (<!! player-chan) ::last-bidder name))
 
 (defn bid-valid? [bid {:keys [::bid-value]}]
@@ -252,7 +325,7 @@
 
 (ds/defn-spec update-game-with-bid!
   [<game> new-bid]
-  (println "new-bid was made for " new-bid)
+  (info "new-bid was made for " new-bid)
   (swap-game! <game> (partial update-bid new-bid)))
 
 
@@ -272,35 +345,11 @@
                (map (partial update-game-with-bid! <game>))
                last)
         new-bid (-> g' ::bid-value)]
-    (println "new bid value for this round " new-bid)
+    (info "new bid value for this round " new-bid)
     (if (or (>= new-bid 28)
            (= new-bid cur-bid))
       (->> g' default-last-bidder (reset! <game>))
       (recur <game>))))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Trump cards secret management ;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(s/def ::trump-id string?)
-
-(s/def ::state (s/map-of ::trump-id ::suit))
-
-(def ^:dynamic *trump-store* (atom {}))
-
-(ds/defn-spec add-trump-suit
-  {::s/args (s/cat :suit ::suit)
-   ::s/ret ::trump-id}
-  [suit]
-  (let [uuid (u/uuid)]
-    (swap! *trump-store* #(assoc % uuid suit))
-    uuid))
-
-(ds/defn-spec get-trump-suit
-  {::s/args (s/cat :id ::trump-id)
-   ::s/ret ::suit}
-  [id]
-  (get @*trump-store* id))
 
 #_(assert (let [suit :diamond]
             (= (get-trump-suit (add-trump-suit suit))
@@ -312,23 +361,24 @@
 
 (ds/defn-spec ask-for-trump
   {::s/args (s/cat :player ::player)
-   ::s/ret ::suit}
+   ::s/ret ::trump}
   [{:keys [::player-chan ::game-chan ::name]}]
-  (println "Asking " name " for trump card.")
+  (info "Asking " name " for trump card.")
   (go (>! game-chan :choose-trump))
-  (<!! player-chan))
+  {::trump-exposed true
+   ::trump-suit (<!! player-chan)})
 
 
 (ds/defn-spec choose-trump
   {::s/args (s/cat :game ::game)
-   ::s/ret ::suit}
+   ::s/ret ::trump}
   [game]
   (-> game ::last-bidder (get-player-by-name game) ask-for-trump))
 
 
 (defn choose-trump! [<game>]
-  (let [suit (choose-trump @<game>)]
-    (swap! <game> assoc ::trump suit)))
+  (let [trump (choose-trump @<game>)]
+    (swap! <game> assoc ::trump trump)))
 
 
 (ds/defn-spec player-choose-trump!
@@ -342,24 +392,81 @@
 (defn deal-hand! [game]
   (reset! game (initial-draw)))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Play the actual game ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn notify-player [{ch ::game-chan name ::name} msg]
+  (info "Going to notify player " name "with msg " msg)
+  (>!! ch msg))
+
+(defn notify-invalid-play [player]
+  (notify-player player :invalid-card))
+
+(defn notify-to-play-trick [player game]
+  (notify-player player
+                 [:play-trick (select-keys game
+                                           [::trump ::game-stage ::suit-led])]))
+
+
+(defn receive-message [{ch ::player-chan}] 
+  (<!! ch))
+
+(defn valid-card [card {hand ::hand}] 
+  (if (some #(= % card) hand) card nil))
+
+(defn play-trick [game player f]
+  (notify-to-play-trick player game)
+  (info (-> player ::name) " Player notified ")
+  (if-let [card (-> player receive-message (valid-card player))]
+    (f card)
+    (do (notify-invalid-play player)
+        (recur game player f))))
+
+(defn play-first-trick [game player]
+  (play-trick game player (fn [card]
+                            (info "card played is " card)
+                            (assoc game
+                                   ::game-stage [card]
+                                   ::suit-led (-> card ::suit)))))
+
+(defn play-normal-trick [game player]
+  (play-trick game player (fn [card]
+                            (update game ::game-stage conj card))))
+
+(defn collect-trick [{:keys [::suit-led] :as game} player]
+  (if (nil? suit-led)
+    (play-first-trick game player)
+    (play-normal-trick game player)))
+
+(defn play-round [game]
+  (->> game
+     ::players
+     (reduce collect-trick game)))
+
+
+(defn play-game [<game>]
+  (play-round @<game>))
+
 
 (defn run-game [game]
-  (println "Starting to run game")
+  (info "Starting to run game")
   (dosync (when (and (redeal-possible? @game)
                    (do (change-game-state! game ::asking-for-redeal)
                        (ask-for-redeal? @game)))
-            (println "Dealing hand again")
+            (info "Dealing hand again")
             (deal-hand! game))
-          (println "Now, let's start bidding")
+          (info "Now, let's start bidding")
           (change-game-state! game ::bidding)
           (start-bidding! game)
-          (println "Final bid is " (-> @game ::bid-value))
+          (info "Final bid is " (-> @game ::bid-value))
           (change-game-state! game ::choose-trump)
-          (println "Now the last bidder will choose a trump")
+          (info "Now the last bidder will choose a trump")
           (choose-trump! game)
-          (println "Trump chosen is " (-> @game ::trump))
+          (info "Trump chosen is " (-> @game ::trump))
           (swap! game (partial distribute-cards 4))
-          (println "okay " (->> @game ::players (map #(-> % ::hand count))))))
+          (play-game game)
+          (info "okay " (->> @game ::players (map #(-> % ::hand count))))))
 
 (defn init-game [game]
   (deal-hand! game))
@@ -369,4 +476,4 @@
 
 #_(go (deal-hand))
 
-#_(go (println "as"))
+#_(go (info "as"))
