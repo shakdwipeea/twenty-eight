@@ -13,7 +13,7 @@
         com.cognitect/transcriptor {:mvn/version "0.1.5"}
         reagent {:mvn/version "0.8.0-alpha2"}
         stylefy {:mvn/version "1.7.0"}
-        re-frame {:mvn/version "0.10.6-SNAPSHOT"}}
+        entranceplus/re-frame {:mvn/version "0.10.6-SNAPSHOT"}}
  :mvn/repos {"jboss" {:url "https://repository.jboss.org/nexus/content/groups/public/"}
              "jitpack" {:url "https://jitpack.io"}} 
  :aliases

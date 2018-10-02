@@ -141,10 +141,10 @@
 (s/def ::trump (s/multi-spec trump-exposed ::trump-exposed))
 
 ;; possible msgs sent from game
-(s/def ::game-ctrl-msg (s/or :commands #{:choose-trump :want-redeal :invalid-card}
+(s/def ::game-ctrl-msg (s/or :commands #{:invalid-card}
                              :redeal-msg #{:want-redeal}
                              :bid-msg (s/tuple #{:bid} ::bid-value)
-                             :choose-trump #{}
+                             :choose-trump (s/tuple #{:choose-trump} ::name)
                              :play-trick (s/tuple #{:play-trick}
                                                   (s/keys :req [::trump]
                                                           :opt [::game-stage ::suit-led]))))
@@ -153,7 +153,8 @@
 (s/def ::player-reply-msg (s/or :redeal-reply boolean?
                                 :bid-reply (s/keys :req [::bid-value])
                                 :trump ::suit
-                                :trick ::card))
+                                :trick ::card
+                                :trump-trick (s/tuple #{:trump} ::card)))
 
 ;; Channels for communication
 (s/def ::game-chan chan?)
@@ -164,7 +165,7 @@
 (s/def ::players (s/* ::player))
 
 ;; current board on which cards are being played
-(s/def ::game-stage (s/* ::card))
+(s/def ::game-stage (s/* (s/keys :req [::name ::card])))
 
 ;; suit currently being led
 (s/def ::suit-led ::suit)
@@ -180,7 +181,8 @@
 ;; to track who bid last we store the name for now
 (s/def ::last-bidder ::name)
 
-(s/def ::new-bid (s/keys :req [::bid-value ::last-bidder]))
+(s/def ::new-bid (s/keys :req [::bid-value]
+                         :opt [::last-bidder]))
 
 (s/def ::game  (s/keys :req [::players ::deck ::game-state]
                        :opt [::bid-value ::last-bidder ::trump ::game-stage ::suit-led]))
@@ -189,7 +191,7 @@
 ;; Players ;;
 ;;;;;;;;;;;;;
 
-(defn get-player-by-name [name game]
+(defn get-player-by-name [game name]
   (->> game
      ::players
      (filter #(= (-> % ::name) name))
@@ -203,13 +205,16 @@
   (for [p (range 0 4)]
     {::name (str "player-" p)
      ::score 0
-     ::player-chan (chan-of ::player-reply-msg 1)
-     ::game-chan (chan-of ::game-ctrl-msg 1)
+     ::player-chan (chan-of ::player-reply-msg 4)
+     ::game-chan (chan-of ::game-ctrl-msg 4)
      ::hand []}))
 
 (defn swap-game!
   [game f]
   (swap! game f))
+
+(defn change-game-state [game new-state]
+  (assoc game ::game-state new-state))
 
 (ds/defn-spec change-game-state! 
   [game new-state]
@@ -229,7 +234,6 @@
   [game]
   (pipe-trans (<notify-game-change game) (map ::game-state)))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Game transition functions ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -245,7 +249,7 @@
                         deck)         
          ::deck (nthrest deck (count players))))
 
-(defn distribute-cards [num-cards game]
+(defn distribute-cards [game num-cards]
   (reduce (fn [g i]
             (deal-cards g)) 
           game (range 0 num-cards)))
@@ -253,10 +257,11 @@
 (ds/defn-spec initial-draw
   {::s/ret ::game}
   []
-  (distribute-cards 4 {::players (gen-players)
-                       ::game-state ::started
-                       ::bid-value 16
-                       ::deck (shuffle deck)}))
+  (distribute-cards {::players (gen-players)
+                     ::game-state ::started
+                     ::bid-value 16
+                     ::deck (shuffle deck)}
+                    4))
 
 #_(initial-draw)
 
@@ -297,14 +302,18 @@
 
 (ds/defn-spec receive-bid
   "Ask for bid to player and receive the value"
-  {::s/args (s/cat :bid-value ::bid-value
+  {::s/args (s/cat :bid ::new-bid
                    :player ::player)
    :s/ret ::new-bid}
-  [bid-value {:keys [::game-chan ::player-chan ::name]}]
-  (info "will ask for bid ")
-  (>!! game-chan [:bid bid-value])
+  [{cur-bid ::bid-value} {:keys [::game-chan ::player-chan ::name]}]
+  (info "will ask for bid to " name)
+  (>!! game-chan [:bid cur-bid])
   (info "Will now wait for bids to come")
-  (assoc (<!! player-chan) ::last-bidder name))
+  (let [msg (<!! player-chan)]
+    (info "Received " msg " from player " name)    
+    (assoc (cond-> msg
+             (= :pass (::bid-value msg)) (assoc ::bid-value cur-bid))
+           ::last-bidder name)))
 
 (defn bid-valid? [bid {:keys [::bid-value]}]
   (< bid-value bid))
@@ -312,21 +321,17 @@
 (ds/defn-spec perform-bid!
   {::s/args (s/cat :player ::player
                    :bid-value ::bid-value)}
-  [{:keys [::player-chan]} bid-value]
+  [{:keys [::player-chan ::name]} bid-value]
+  (info "Performing bid " bid-value " for player " name)
   (>!! player-chan {::bid-value bid-value}))
 
 (defn update-bid
   {::s/args (s/cat :new-bid ::new-bid
                    :game ::game)}
-  [{:keys [::bid-value ::last-bidder] :as new-bid} game] 
+  [game {:keys [::bid-value ::last-bidder] :as new-bid}] 
   (cond-> game
     (not= bid-value :pass) (assoc ::bid-value bid-value
                                ::last-bidder last-bidder)))
-
-(ds/defn-spec update-game-with-bid!
-  [<game> new-bid]
-  (info "new-bid was made for " new-bid)
-  (swap-game! <game> (partial update-bid new-bid)))
 
 
 (ds/defn-spec default-last-bidder
@@ -337,19 +342,17 @@
   (cond-> g
     (nil? last-bidder) (assoc ::last-bidder (-> g ::players first ::name))))
 
-
-(defn start-bidding! [<game>] 
-  (let [{players ::players cur-bid ::bid-value :as g} @<game>
-        g'  (->> players
-               (map (partial receive-bid cur-bid))
-               (map (partial update-game-with-bid! <game>))
-               last)
+(defn start-bidding [{players ::players cur-bid ::bid-value :as game}] 
+  (let [g'  (->> players
+               (reduce receive-bid {::bid-value cur-bid})
+               (update-bid game))
         new-bid (-> g' ::bid-value)]
     (info "new bid value for this round " new-bid)
     (if (or (>= new-bid 28)
            (= new-bid cur-bid))
-      (->> g' default-last-bidder (reset! <game>))
-      (recur <game>))))
+      (default-last-bidder g')
+      (recur g'))))
+
 
 #_(assert (let [suit :diamond]
             (= (get-trump-suit (add-trump-suit suit))
@@ -364,21 +367,17 @@
    ::s/ret ::trump}
   [{:keys [::player-chan ::game-chan ::name]}]
   (info "Asking " name " for trump card.")
-  (go (>! game-chan :choose-trump))
+  (>!! game-chan [:choose-trump name])
+  (info "Now waiting for response " name)
   {::trump-exposed true
    ::trump-suit (<!! player-chan)})
 
 
 (ds/defn-spec choose-trump
   {::s/args (s/cat :game ::game)
-   ::s/ret ::trump}
+   ::s/ret ::game}
   [game]
-  (-> game ::last-bidder (get-player-by-name game) ask-for-trump))
-
-
-(defn choose-trump! [<game>]
-  (let [trump (choose-trump @<game>)]
-    (swap! <game> assoc ::trump trump)))
+  (->> game ::last-bidder (get-player-by-name game) ask-for-trump (assoc game ::trump)))
 
 
 (ds/defn-spec player-choose-trump!
@@ -401,6 +400,7 @@
   (>!! ch msg))
 
 (defn notify-invalid-play [player]
+  (error "Invalud card played by player " (-> player ::name))
   (notify-player player :invalid-card))
 
 (defn notify-to-play-trick [player game]
@@ -409,30 +409,51 @@
                                            [::trump ::game-stage ::suit-led])]))
 
 
-(defn receive-message [{ch ::player-chan}] 
+(defn receive-message [{ch ::game-chan}] 
   (<!! ch))
 
-(defn valid-card [card {hand ::hand}] 
+(defn get-msg-from-player [{ch ::player-chan}]
+  (<!! ch))
+
+(defn card-in-hand
+  "if card is present in hand then get it"
+  [card hand]
   (if (some #(= % card) hand) card nil))
+
+(defn legal-card?
+  "if there is a suit-led and the player has a card of that suit
+   and still plays a card from another suit ..that's illegal"
+  [suit-led hand {suit ::suit}]
+  (or (= suit suit-led)
+     (not-any? #(-> % ::suit (= suit-led)) hand)))
+
+(defn valid-card
+  "if card is valid return it"
+  [card {hand ::hand} {suit-led ::suit-led}]
+  (info "checking card legality " card hand suit-led)
+  (and (legal-card? suit-led hand card)
+     (card-in-hand card hand)))
 
 (defn play-trick [game player f]
   (notify-to-play-trick player game)
   (info (-> player ::name) " Player notified ")
-  (if-let [card (-> player receive-message (valid-card player))]
+  (if-let [card (-> player get-msg-from-player (valid-card player game))]
     (f card)
     (do (notify-invalid-play player)
         (recur game player f))))
 
-(defn play-first-trick [game player]
+(defn play-first-trick [game {:keys [::name] :as player}]
   (play-trick game player (fn [card]
                             (info "card played is " card)
                             (assoc game
-                                   ::game-stage [card]
+                                   ::game-stage [{::name name
+                                                  ::card card}]
                                    ::suit-led (-> card ::suit)))))
 
-(defn play-normal-trick [game player]
+(defn play-normal-trick [game {:keys [::name] :as player}]
   (play-trick game player (fn [card]
-                            (update game ::game-stage conj card))))
+                            (update game ::game-stage conj {::name name
+                                                            ::card card}))))
 
 (defn collect-trick [{:keys [::suit-led] :as game} player]
   (if (nil? suit-led)
@@ -445,35 +466,40 @@
      (reduce collect-trick game)))
 
 
-(defn play-game [<game>]
-  (play-round @<game>))
+(defn play-game [game]
+  (play-round game))
 
+(defn ask-and-redeal
+  "ask player if he wants redeal and perform it"
+  [game]
+  (let [game (change-game-state game ::asking-for-redeal)]
+    (if (ask-for-redeal? game)
+      (do (info "Dealing hand again")
+          (distribute-cards game 4))
+      game)))
 
-(defn run-game [game]
+(defn check-for-redeal [game]
+  (cond-> game
+    (redeal-possible? game) ask-and-redeal))
+
+(defn print-game-key [game key tag]
+  (info tag (-> game key))
+  game)
+
+(defn run-game
+  "run a game.. a game can be constructed from initial-draw"
+  [game]
   (info "Starting to run game")
-  (dosync (when (and (redeal-possible? @game)
-                   (do (change-game-state! game ::asking-for-redeal)
-                       (ask-for-redeal? @game)))
-            (info "Dealing hand again")
-            (deal-hand! game))
-          (info "Now, let's start bidding")
-          (change-game-state! game ::bidding)
-          (start-bidding! game)
-          (info "Final bid is " (-> @game ::bid-value))
-          (change-game-state! game ::choose-trump)
-          (info "Now the last bidder will choose a trump")
-          (choose-trump! game)
-          (info "Trump chosen is " (-> @game ::trump))
-          (swap! game (partial distribute-cards 4))
-          (play-game game)
-          (info "okay " (->> @game ::players (map #(-> % ::hand count))))))
+  (-> game
+     check-for-redeal
+     (change-game-state ::bidding)
+     start-bidding
+     (print-game-key ::bid-value "bid value:")
+     (change-game-state ::choose-trump)
+     choose-trump
+     (print-game-key ::trump "Trump chosen is ")
+     (distribute-cards 4)
+     play-game))
 
 (defn init-game [game]
   (deal-hand! game))
-
-;; todo encode and verify possible states through spec
-#_(-> game ::players first ::action (>!! false))
-
-#_(go (deal-hand))
-
-#_(go (info "as"))

@@ -13,16 +13,9 @@
                                      (< b 28) (+ 1)))
                 :simply-pass (fn [_] :pass)})
 
-(defn run-player [{:keys [::c/player-chan ::c/game-chan]} bid-func-type] 
-  (let [bidf (get bid-funcs bid-func-type)
-        game-msg (<!! game-chan)
-        [msg-type value] (s/conform ::c/game-ctrl-msg game-msg)] 
-    (case msg-type
-      :redeal-msg (>!! player-chan false)
-      :bid-msg (do (info "Trying to bid using strategy:-: " bid-func-type (-> value second second bidf))
-                   (>!! player-chan {::c/bid-value (or (-> value second second bidf)
-                                                      16)}))
-      (info "What gibberish!!"))))
+(defn conform-game-msg! [player]
+  (info "waiting for msg on " (-> player ::c/name))
+  (s/conform ::c/game-ctrl-msg (c/receive-message player)))
 
 #_(-> (s/conform ::c/game-ctrl-msg [:bid 17]))
 
@@ -30,36 +23,33 @@
   (info name "Player is replying with " msg)
   (>!! ch msg))
 
+(def find-first (comp first filter))
+
+#_(find-first #{:abc}  #{:abc :def})
+
+(defn choose-card [suit-led hand]
+  (info "Choosing card suit-led: " suit-led " hand suits " (doall (map ::c/suit hand)))
+  (or (first (filter (partial c/legal-card? suit-led hand) hand))
+     (rand-nth hand)))
+
 (defn play-card [{hand ::c/hand :as p}]
-  (player-msg p (rand-nth hand)))
+  (let [[tag [_ p1]] (conform-game-msg! p)]
+    (info "p1 is " p1)
+    (case tag
+      :play-trick (player-msg p (choose-card (::c/suit-led p1) hand))
+      (error "This fn cannot handle this"))))
 
 #_(some #(= % (->> first-player ::c/hand rand-nth)) (::c/hand first-player))
 
 (defn echo-game [game]
   (->> game
      ::c/players
-     (map (fn [{game-chan ::c/game-chan}]
-            (async/thread (while true (info "Message for game-chan" (<!! game-chan))))))
+     (map (fn [{game-chan ::c/game-chan name ::c/name}]
+            (async/thread (while true (info "Message for game-chan " (<!! game-chan) " for player " name)))))
      doall))
 
-(defn state-listener [game]
-  (async/go-loop []
-    (let [new-state (<! (c/<notify-game-state-change game))]
-      (info "State now is " new-state)
-      (assert (s/valid? ::c/game-state new-state)))
-    (recur)))
-
-(defn run-players
-  [g bid-func-type]
-  (info "Run players " (keys g))
-  (doseq [p (-> g ::c/players)]
-    (info "Running player")
-    (async/thread (while true (run-player p bid-func-type)))))
 
 (defn play-game [game]
-  (state-listener game)
-  (c/init-game game)
-  (echo-game @game)
   (async/thread (c/run-game game)))
 
 
@@ -72,7 +62,55 @@
 
 #_(empty? (select-keys @game [::c/trump ::c/game-stage ::c/suit-led])
           )
+(defn perform-bid-for-all! [players]
+  (info "Count of playr (3) = " (count players))
+  (doseq [p players]
+    (let [[tag value] (conform-game-msg! p)]
+      (info "received for " (-> p ::c/name) value)
+      (case tag
+        :bid-msg (c/perform-bid! p :pass)
+        (error "invalid handler " tag)))))
 
+(def name "player-3")
+
+#_(do (def game (c/initial-draw))
+      (def th (async/thread (def g' (c/run-game game))))
+      (def first-player (-> game ::c/players first))
+      ;; to bidding
+      (loop [[tag value] (conform-game-msg! first-player)]
+        (info "Tag is " tag)
+        (case tag
+          :redeal-msg (do (c/reply-for-redeal! first-player false)
+                          (recur (conform-game-msg! first-player)))
+          :bid-msg (let [ps (->> game ::c/players)]
+                     (c/perform-bid! (first ps) 16)
+                     (perform-bid-for-all! (rest ps)))
+          (error "unknown msg from game " value)))
+
+      ;; choose-trump
+      (let [[[_ name] _] (->> game
+                            ::c/players
+                            (map ::c/game-chan)
+                            (mapv (fn [src]
+                                    (let [dest (async/mult src)]
+                                      (async/tap dest src) src)))
+                            async/alts!!)]
+        (info "player is" name)
+        (let [[tag val] (conform-game-msg! (c/get-player-by-name game name))]
+          (info "got it")
+          (case tag
+            :choose-trump (c/player-choose-trump! (c/get-player-by-name game name) :diamond)
+            (error "invalid handler fn " tag val))))
+      
+      ;; play cards
+      (doseq [p (-> game ::c/players)]
+        (play-card p))
+
+      (<!! th))
+
+
+
+#_(-> g' keys)
 
 #_(play-game game)
 
@@ -96,7 +134,7 @@
 
 #_(play-card first-player)
 
-#_(play-card (-> @game ::c/players (nth 3)))
+#_(play-card (-> @game ::c/players (nth 2)))
 ;; View game state
 #_(-> @game ::c/game-state)
 
@@ -107,3 +145,28 @@
 #_(-> @game ::c/trump)
 
 #_(c/get-player-by-name "player-0" @game)
+
+;; testing legal card
+#_(c/legal-card? :diamond (-> first-player ::c/hand first) (-> first-player ::c/hand))
+
+
+;; Core async experiment
+
+;; (def hi (async/chan 10))
+
+;; (def chans (for [n (range 4)]
+;;              (async/chan 2)))
+
+;; (async/thread  (let [[val p] (async/alts!!  (mapv (fn [ch]
+;;                                                     (let [dest (async/mult ch)]
+;;                                                       (async/tap dest ch)
+;;                                                       )) chans))]
+;;                  (info "val is " val)))
+
+;; (map (fn [ch] (>!! ch :stuff)) chans)
+
+;; (<!! (nth chans 2))
+
+;; (>!! hi :hi)
+
+;; (<!! hi)
