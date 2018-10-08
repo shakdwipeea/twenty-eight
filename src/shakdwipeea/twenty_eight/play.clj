@@ -3,21 +3,33 @@
             [clojure.spec.test.alpha :as test]
             [taoensso.timbre :as timbre]
             [shakdwipeea.twenty-eight.core :as c]
+            [snow.async :as a]
             [defn-spec.core :as ds]
+            [clojure.string :as string]
             [clojure.core.async :refer [go >!! <!! <! >!] :as async]))
+
+(def sz 4)
 
 (timbre/refer-timbre)
 
-(def bid-funcs {:types '(:bid-higher :simply-pass)
-                :bid-higher (fn [b] (cond-> b
-                                     (< b 28) (+ 1)))
-                :simply-pass (fn [_] :pass)})
+
+(defn receive-message [{mult ::game->player-mult}]
+  (let [game-dup-chan (async/chan sz)]
+    (async/tap mult game-dup-chan)
+    (<!! game-dup-chan)))
 
 (defn conform-game-msg! [player]
   (info "waiting for msg on " (-> player ::c/name))
-  (s/conform ::c/game-ctrl-msg (c/receive-message player)))
+  (s/conform ::c/game->player-msg (receive-message player)))
 
-#_(-> (s/conform ::c/game-ctrl-msg [:bid 17]))
+#_(-> (s/conform ::c/game->player-msg [:bid 17]))
+
+(defn handle-msg! [player tag f]
+  (let [[t value] (conform-game-msg! player)]
+    (info "received for " (-> player ::c/name) value)
+    (if (= t tag)
+      (f value)
+      (error "invalid handler " tag value))))
 
 (defn player-msg [{ch ::c/player-chan name ::c/name} msg]
   (info name "Player is replying with " msg)
@@ -28,29 +40,18 @@
 #_(find-first #{:abc}  #{:abc :def})
 
 (defn choose-card [suit-led hand]
-  (info "Choosing card suit-led: " suit-led " hand suits " (doall (map ::c/suit hand)))
+  (info "Choosing card suit-led: " suit-led " hand suits " (->> hand
+                                                              (map ::c/suit)
+                                                              (string/join ",")))
   (or (first (filter (partial c/legal-card? suit-led hand) hand))
      (rand-nth hand)))
 
 (defn play-card [{hand ::c/hand :as p}]
-  (let [[tag [_ p1]] (conform-game-msg! p)]
-    (info "p1 is " p1)
-    (case tag
-      :play-trick (player-msg p (choose-card (::c/suit-led p1) hand))
-      (error "This fn cannot handle this"))))
+  (handle-msg! p
+               :play-trick
+               (fn [_ {suit-led ::c/suit-led}]
+                 (player-msg p (choose-card suit-led hand)))))
 
-#_(some #(= % (->> first-player ::c/hand rand-nth)) (::c/hand first-player))
-
-(defn echo-game [game]
-  (->> game
-     ::c/players
-     (map (fn [{game-chan ::c/game-chan name ::c/name}]
-            (async/thread (while true (info "Message for game-chan " (<!! game-chan) " for player " name)))))
-     doall))
-
-
-(defn play-game [game]
-  (async/thread (c/run-game game)))
 
 
 ;; execute these statements to play the game .. for emacs C-c C-c
@@ -62,20 +63,103 @@
 
 #_(empty? (select-keys @game [::c/trump ::c/game-stage ::c/suit-led])
           )
-(defn perform-bid-for-all! [players]
-  (info "Count of playr (3) = " (count players))
-  (doseq [p players]
-    (let [[tag value] (conform-game-msg! p)]
-      (info "received for " (-> p ::c/name) value)
-      (case tag
-        :bid-msg (c/perform-bid! p :pass)
-        (error "invalid handler " tag)))))
 
-(def name "player-3")
+(def n "player-3")
 
-#_(do (def game (c/initial-draw))
-      (def th (async/thread (def g' (c/run-game game))))
+(defn make-mult 
+  [players]
+  (map (fn [{ch ::c/game->player-chan :as p}]
+         (assoc p ::game->player-mult (async/mult ch)))  players))
+
+(defn subscribe-game-state
+  "returns a chan which will info about game stage changes"
+  [{ch ::c/game-chan}]
+  (a/subscribe (async/mult ch) ::control ::state-change))
+
+
+(defn get-pubs
+  "return publication of game channel for all players"
+  [players]
+  (->> players
+     (map (fn [{mult ::game->player-mult :as p}]
+            (def tp p)
+            (assoc p
+                   ::hand-update-chan
+                   (a/subscribe mult
+                                #(->> % (s/conform ::c/game->player-msg) first)
+                                :new-hand))))
+     doall))
+
+#_(<!! hand-update-chan)
+
+;; (def first-player (-> @game ::c/players first))
+
+;; (def chan (async/chan 2 ))
+
+;; (-> first-player ::c/game->player-chan (>!! [:new-hand [(-> @game ::c/deck first)]]))
+
+;; (def pub (async/pub (-> first-player ::c/game->player-chan) #(->> % (s/conform ::c/game->player-msg) first)))
+
+;; (async/sub pub :new-hand chan)
+
+;; (<!! chan)
+
+
+(def game (atom {}))
+
+(defn player-actions [player msg]
+  (let [[tag _] (s/conform ::c/game->player-msg msg)]
+    (case tag
+      :redeal-msg (do (c/reply-for-redeal! player false)
+                      player)
+      :bid-msg (do (c/perform-bid! player 16)
+                   player)
+      :new-hand (assoc player ::c/hand (second msg))
+      (do (error "unknown msg from game " msg ".. waiting for next msg")
+          player))))
+
+#_(partial reduce player-actions player)
+
+(defn start-player [{mult ::game->player-mult name ::c/name :as player}]
+  (let [game-dup-chan (async/chan sz )]
+    (async/tap mult game-dup-chan)
+    (info "Starting player " name)
+    (async/reduce player-actions player game-dup-chan)))
+
+
+(defn start-players [game]
+  (doseq [p (-> game ::c/players)]
+    (async/thread (start-player p))))
+
+#_(defn complete-bidding [game]
+    (let [first-player (-> game ::c/players first)]
+      (loop [[tag value] (conform-game-msg! first-player)]
+        (info "Tag is " tag)
+        (case tag
+          :redeal-msg (do (c/reply-for-redeal! first-player false)
+                          (recur (conform-game-msg! first-player)))
+          :bid-msg (let [ps (->> game ::c/players)]
+                     (c/perform-bid! (first ps) 16)
+                     (perform-bid-for-all! (rest ps)))
+          (error "unknown msg from game " value)))))
+
+#_(->> @game ::c/players (map (comp count ::c/hand)))
+
+#_(do (reset! game (c/initial-draw))
+
+      (let [p' (-> @game ::c/players get-pubs)]
+        (swap! game assoc ::c/players p'))
+
+      ;; update hand continuosly
+      (async/thread (hand-update-subscriber game)) 
+
+      ;; run the game
+      (def th (async/thread (def g' (c/run-game @game))))
+
+      ;; first player
       (def first-player (-> game ::c/players first))
+      
+      (def  (update-hands game))
       ;; to bidding
       (loop [[tag value] (conform-game-msg! first-player)]
         (info "Tag is " tag)
@@ -88,19 +172,21 @@
           (error "unknown msg from game " value)))
 
       ;; choose-trump
-      (let [[[_ name] _] (->> game
-                            ::c/players
-                            (map ::c/game-chan)
-                            (mapv (fn [src]
-                                    (let [dest (async/mult src)]
-                                      (async/tap dest src) src)))
-                            async/alts!!)]
-        (info "player is" name)
-        (let [[tag val] (conform-game-msg! (c/get-player-by-name game name))]
-          (info "got it")
-          (case tag
-            :choose-trump (c/player-choose-trump! (c/get-player-by-name game name) :diamond)
-            (error "invalid handler fn " tag val))))
+      #_(let [[[_ name] _] (->> game
+                                ::c/players
+                                (map ::c/game->player-chanxs)
+                                (mapv (fn [src]
+                                        (let [dest (async/mult src)]
+                                          (async/tap dest src))))
+                                async/alts!!)]
+          (info "player is" name))
+      (handle-msg! (c/get-player-by-name game n)
+                   :choose-trump
+                   (fn [_]
+                     (info "got it")
+                     (c/player-choose-trump! (c/get-player-by-name game n) :diamond)))
+
+      (def game (update-hands game))
       
       ;; play cards
       (doseq [p (-> game ::c/players)]
@@ -170,3 +256,64 @@
 ;; (>!! hi :hi)
 
 ;; (<!! hi)
+
+;; let's do some pub sub
+
+(def ch (async/chan 10))
+
+(def pub (async/pub ch :hello))
+
+(def out-ch (async/chan 10))
+
+(async/sub pub :first out-ch)
+
+(>!! ch {:hello :first
+         :not :any})
+
+(<!! out-ch)
+
+;; Perfect! this was using map key as topic-fn
+
+;; Now let's try conforming to spec
+
+;; first we define a simple spec
+
+(def element-chan (async/chan 10))
+
+(def woah (s/def ::good-element (s/or :water #{:water}
+                                      :air #{:air}
+                                      :number int?)))
+
+;; conform gives us [tag value]
+(s/conform ::good-element :water)
+
+(defn tag-topic [val]
+  (println "var is " val)
+  (first (s/conform ::good-element val)))
+
+(tag-topic :water)
+
+(def pub2 (async/pub element-chan tag-topic))
+
+(def air-chan (async/chan 10 (map inc)))
+
+(async/sub pub2 :air air-chan)
+
+(async/sub pub2 :number air-chan)
+
+(>!! element-chan 19)
+
+(<!! air-chan)
+
+#_(<!! element-chan)
+
+;; Great!
+
+;; (def c (a/subscribe element-chan :type :water))
+
+;; (>!! element-chan {:type :water
+;;                    :element :air})
+
+;; (<!! c)
+
+;; (def go-away (a/subscribe-val element-chan :type :world))

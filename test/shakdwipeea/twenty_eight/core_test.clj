@@ -1,6 +1,7 @@
 (ns shakdwipeea.twenty-eight.core-test
   (:require [shakdwipeea.twenty-eight.play :as p]
             [shakdwipeea.twenty-eight.core :as c]
+            [snow.async :as a]
             [clojure.test :as t :refer [is deftest]]
             [clojure.core.async :refer [go >!! <!! <! >!] :as async]))
 
@@ -14,12 +15,35 @@
     ;; query bid value
     (is (= 16 (-> @game-1 ::c/bid-value))))
 
-(deftest game-sim-2
-  (def game-2 (atom {}))
+(def test-msg {::c/control ::c/state-change
+               ::c/game-state ::c/choose-trump})
 
-  (<!! (go (p/play-game game-2 :bid-higher)))
-  (is (= 28 (-> @game-2 ::c/bid-value))))
+(deftest game-control-sub []
+  (let [sample-chan (c/chan-of ::c/game-control 2)
+        dest-chan (a/subscribe sample-chan ::c/control ::c/state-change)] 
+    (is (true? (>!! sample-chan test-msg)))
+    (is (= (<!! dest-chan) test-msg))))
 
+(def game (atom {}))
+
+#_(-> @game ::c/players)
+
+(def players (-> @game ::c/players))
+
+(c/update-hand @game (first players) [])
+
+(deftest game-sim-test 
+  (reset! game (c/initial-draw))
+
+  ;; setup pub channels
+  (let [p' (-> @game ::c/players p/make-mult p/get-pubs)]
+    (swap! game assoc ::c/players p'))
+
+  ;; setup state atom
+
+  (async/thread (p/start-players @game))
+
+  (async/thread (c/run-game @game)))
 #_(go (hi))
 
 #_(c/change-game-state! ::c/started)

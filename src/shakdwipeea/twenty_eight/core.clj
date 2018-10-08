@@ -2,6 +2,7 @@
   (:require [clojure.spec.alpha :as s]
             [clojure.core.async :refer [chan <!! >!! go <! >!] :as a]
             [snow.util :as u]
+            [snow.async :as async]
             [taoensso.timbre :as timbre]
             [special.core :refer [condition manage]]
             [defn-spec.core :as ds]
@@ -141,13 +142,15 @@
 (s/def ::trump (s/multi-spec trump-exposed ::trump-exposed))
 
 ;; possible msgs sent from game
-(s/def ::game-ctrl-msg (s/or :commands #{:invalid-card}
-                             :redeal-msg #{:want-redeal}
-                             :bid-msg (s/tuple #{:bid} ::bid-value)
-                             :choose-trump (s/tuple #{:choose-trump} ::name)
-                             :play-trick (s/tuple #{:play-trick}
-                                                  (s/keys :req [::trump]
-                                                          :opt [::game-stage ::suit-led]))))
+(s/def ::game->player-msg (s/or :commands #{:invalid-card}
+                                :redeal-msg #{:want-redeal}
+                                :bid-msg (s/tuple #{:bid} ::bid-value)
+                                :choose-trump (s/tuple #{:choose-trump} ::name)
+                                :new-hand (s/tuple #{:new-hand} ::hand)
+                                :play-trick (s/tuple #{:play-trick}
+                                                     (s/keys :req [::trump]
+                                                             :opt [::game-stage ::suit-led]))))
+
 
 ;; possible replies sent by the player
 (s/def ::player-reply-msg (s/or :redeal-reply boolean?
@@ -156,11 +159,23 @@
                                 :trick ::card
                                 :trump-trick (s/tuple #{:trump} ::card)))
 
-;; Channels for communication
-(s/def ::game-chan chan?)
+(s/def ::control #{::state-change})
+
+(defmulti game-control ::control)
+(defmethod game-control ::state-change [_] (s/keys :req [::control ::game-state]))
+
+(s/def ::game-control (s/multi-spec game-control ::control))
+
+;; channel for game to communicate with a particular player
+(s/def ::game->player-chan chan?)
+
+;; channel for player to respond on
 (s/def ::player-chan chan?)
 
-(s/def ::player (s/keys :req [::name ::score ::hand ::game-chan ::player-chan]))
+;; channel for game wide communication
+(s/def ::game-chan chan?)
+
+(s/def ::player (s/keys :req [::name ::score ::hand ::game->player-chan ::player-chan]))
 
 (s/def ::players (s/* ::player))
 
@@ -184,7 +199,7 @@
 (s/def ::new-bid (s/keys :req [::bid-value]
                          :opt [::last-bidder]))
 
-(s/def ::game  (s/keys :req [::players ::deck ::game-state]
+(s/def ::game  (s/keys :req [::players ::deck ::game-state ::game-chan]
                        :opt [::bid-value ::last-bidder ::trump ::game-stage ::suit-led]))
 
 ;;;;;;;;;;;;;
@@ -206,37 +221,35 @@
     {::name (str "player-" p)
      ::score 0
      ::player-chan (chan-of ::player-reply-msg 4)
-     ::game-chan (chan-of ::game-ctrl-msg 4)
+     ::game->player-chan (chan-of ::game->player-msg 4)
      ::hand []}))
 
-(defn swap-game!
-  [game f]
-  (swap! game f))
+(defn update-hand [game {name ::name} new-hand]
+  (info "new-hand size " name (count new-hand))
+  (update game
+          ::players
+          #(->> %
+              (map (fn [{n' ::name :as p}]
+                     (cond-> p
+                       (= n' name) (assoc ::hand new-hand)))))))
 
-(defn change-game-state [game new-state]
+
+(defn change-game-state [{ :keys [::game-chan ::game-state] :as game} new-state]
+  (info "Changing game state to " new-state)
+  (go (>! game-chan {::control ::state-change
+                     ::game-state game-state}))
   (assoc game ::game-state new-state))
 
-(ds/defn-spec change-game-state! 
-  [game new-state]
-  (swap-game! game #(assoc % ::game-state new-state)))
-
-(ds/defn-spec <notify-game-change
-  {::s/ret chan?}
-  [game]
-  (let [ch (chan 10)]
-    (add-watch game :watcher (fn [key atom old-state new-state]
-                               (info "State changed")
-                               (>!! ch new-state)))
-    ch))
-
-(ds/defn-spec <notify-game-state-change
-  {::s/ret chan?}
-  [game]
-  (pipe-trans (<notify-game-change game) (map ::game-state)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Game transition functions ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn notify-new-hand
+  "Notify the new hand .. this would generally be when cards is being dealt/redealt"
+  [{:keys [::game->player-chan ::hand ::name] :as player}]
+  (info "Notifying player " name " for new hand " (count hand))
+  (>!! game->player-chan [:new-hand hand]))
 
 (ds/defn-spec deal-cards
   {::s/args (s/cat :game ::game)
@@ -254,14 +267,20 @@
             (deal-cards g)) 
           game (range 0 num-cards)))
 
+(defn distribute-and-notify! [game num-cards]
+  (let [g' (distribute-cards game num-cards)]
+    (doseq [p (::players g')]
+      (notify-new-hand p))
+    g'))
+
 (ds/defn-spec initial-draw
   {::s/ret ::game}
   []
-  (distribute-cards {::players (gen-players)
-                     ::game-state ::started
-                     ::bid-value 16
-                     ::deck (shuffle deck)}
-                    4))
+  {::players (gen-players)
+   ::game-state ::started
+   ::bid-value 16
+   ::game-chan (chan-of ::game-control 4)
+   ::deck (shuffle deck)})
 
 #_(initial-draw)
 
@@ -286,8 +305,8 @@
   {::s/args (s/cat :game ::game)
    ::s/ret boolean?}
   [{:keys [::players]}]
-  (let [{:keys [::game-chan ::player-chan]} (first players)]
-    (>!! game-chan :want-redeal)
+  (let [{:keys [::game->player-chan ::player-chan]} (first players)]
+    (>!! game->player-chan :want-redeal)
     (<!! player-chan)))
 
 (ds/defn-spec reply-for-redeal!
@@ -305,9 +324,9 @@
   {::s/args (s/cat :bid ::new-bid
                    :player ::player)
    :s/ret ::new-bid}
-  [{cur-bid ::bid-value} {:keys [::game-chan ::player-chan ::name]}]
+  [{cur-bid ::bid-value} {:keys [::game->player-chan ::player-chan ::name]}]
   (info "will ask for bid to " name)
-  (>!! game-chan [:bid cur-bid])
+  (>!! game->player-chan [:bid cur-bid])
   (info "Will now wait for bids to come")
   (let [msg (<!! player-chan)]
     (info "Received " msg " from player " name)    
@@ -365,9 +384,9 @@
 (ds/defn-spec ask-for-trump
   {::s/args (s/cat :player ::player)
    ::s/ret ::trump}
-  [{:keys [::player-chan ::game-chan ::name]}]
+  [{:keys [::player-chan ::game->player-chan ::name]}]
   (info "Asking " name " for trump card.")
-  (>!! game-chan [:choose-trump name])
+  (>!! game->player-chan [:choose-trump name])
   (info "Now waiting for response " name)
   {::trump-exposed true
    ::trump-suit (<!! player-chan)})
@@ -395,7 +414,7 @@
 ;; Play the actual game ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defn notify-player [{ch ::game-chan name ::name} msg]
+(defn notify-player [{ch ::game->player-chan name ::name} msg]
   (info "Going to notify player " name "with msg " msg)
   (>!! ch msg))
 
@@ -409,7 +428,7 @@
                                            [::trump ::game-stage ::suit-led])]))
 
 
-(defn receive-message [{ch ::game-chan}] 
+(defn receive-message [{ch ::game->player-chan}] 
   (<!! ch))
 
 (defn get-msg-from-player [{ch ::player-chan}]
@@ -465,9 +484,11 @@
      ::players
      (reduce collect-trick game)))
 
+(def g {})
 
 (defn play-game [game]
-  (play-round game))
+  (def g (play-round game))
+  g)
 
 (defn ask-and-redeal
   "ask player if he wants redeal and perform it"
@@ -475,10 +496,11 @@
   (let [game (change-game-state game ::asking-for-redeal)]
     (if (ask-for-redeal? game)
       (do (info "Dealing hand again")
-          (distribute-cards game 4))
+          (distribute-and-notify! game 4))
       game)))
 
 (defn check-for-redeal [game]
+  (info "Checking if redeal is possible")
   (cond-> game
     (redeal-possible? game) ask-and-redeal))
 
@@ -491,6 +513,7 @@
   [game]
   (info "Starting to run game")
   (-> game
+     (distribute-and-notify! 4)
      check-for-redeal
      (change-game-state ::bidding)
      start-bidding
@@ -498,7 +521,7 @@
      (change-game-state ::choose-trump)
      choose-trump
      (print-game-key ::trump "Trump chosen is ")
-     (distribute-cards 4)
+     (distribute-and-notify! 4)
      play-game))
 
 (defn init-game [game]
