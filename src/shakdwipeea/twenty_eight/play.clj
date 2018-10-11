@@ -8,7 +8,7 @@
             [clojure.string :as string]
             [clojure.core.async :refer [go >!! <!! <! >!] :as async]))
 
-(def sz 4)
+(def sz 14)
 
 (timbre/refer-timbre)
 
@@ -18,11 +18,14 @@
     (async/tap mult game-dup-chan)
     (<!! game-dup-chan)))
 
+
 (defn conform-game-msg! [player]
   (info "waiting for msg on " (-> player ::c/name))
   (s/conform ::c/game->player-msg (receive-message player)))
 
+
 #_(-> (s/conform ::c/game->player-msg [:bid 17]))
+
 
 (defn handle-msg! [player tag f]
   (let [[t value] (conform-game-msg! player)]
@@ -31,13 +34,17 @@
       (f value)
       (error "invalid handler " tag value))))
 
+
 (defn player-msg [{ch ::c/player-chan name ::c/name} msg]
   (info name "Player is replying with " msg)
   (>!! ch msg))
 
+
 (def find-first (comp first filter))
 
+
 #_(find-first #{:abc}  #{:abc :def})
+
 
 (defn choose-card [suit-led hand]
   (info "Choosing card suit-led: " suit-led " hand suits " (->> hand
@@ -45,6 +52,7 @@
                                                               (string/join ",")))
   (or (first (filter (partial c/legal-card? suit-led hand) hand))
      (rand-nth hand)))
+
 
 (defn play-card [{hand ::c/hand :as p}]
   (handle-msg! p
@@ -71,24 +79,13 @@
   (map (fn [{ch ::c/game->player-chan :as p}]
          (assoc p ::game->player-mult (async/mult ch)))  players))
 
+
 (defn subscribe-game-state
   "returns a chan which will info about game stage changes"
   [{ch ::c/game-chan}]
   (a/subscribe (async/mult ch) ::control ::state-change))
 
 
-(defn get-pubs
-  "return publication of game channel for all players"
-  [players]
-  (->> players
-     (map (fn [{mult ::game->player-mult :as p}]
-            (def tp p)
-            (assoc p
-                   ::hand-update-chan
-                   (a/subscribe mult
-                                #(->> % (s/conform ::c/game->player-msg) first)
-                                :new-hand))))
-     doall))
 
 #_(<!! hand-update-chan)
 
@@ -107,18 +104,39 @@
 
 (def game (atom {}))
 
+(defn play-card! [player suit-led]
+  (->> player
+     ::c/hand
+     (choose-card suit-led)
+     (player-msg player)))
+
+
 (defn player-actions [player msg]
+  (info "Trying to conform now")
   (let [[tag _] (s/conform ::c/game->player-msg msg)]
+    (info "Msg is " msg " tag is " tag)
     (case tag
+      
       :redeal-msg (do (c/reply-for-redeal! player false)
                       player)
+      
       :bid-msg (do (c/perform-bid! player 16)
                    player)
+      
       :new-hand (assoc player ::c/hand (second msg))
+      
+      :choose-trump (do (c/player-choose-trump! player :diamond)
+                        player)
+      
+      :play-trick (do (play-card! player (-> msg second ::c/suit-led))
+                      player)
+      
       (do (error "unknown msg from game " msg ".. waiting for next msg")
           player))))
 
+
 #_(partial reduce player-actions player)
+
 
 (defn start-player [{mult ::game->player-mult name ::c/name :as player}]
   (let [game-dup-chan (async/chan sz )]
@@ -130,6 +148,7 @@
 (defn start-players [game]
   (doseq [p (-> game ::c/players)]
     (async/thread (start-player p))))
+
 
 #_(defn complete-bidding [game]
     (let [first-player (-> game ::c/players first)]

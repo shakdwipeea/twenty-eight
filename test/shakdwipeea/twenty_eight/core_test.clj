@@ -20,7 +20,7 @@
 
 (deftest game-control-sub []
   (let [sample-chan (c/chan-of ::c/game-control 2)
-        dest-chan (a/subscribe sample-chan ::c/control ::c/state-change)] 
+        dest-chan (a/subscribe (async/mult sample-chan) ::c/control ::c/state-change)]
     (is (true? (>!! sample-chan test-msg)))
     (is (= (<!! dest-chan) test-msg))))
 
@@ -36,14 +36,17 @@
   (reset! game (c/initial-draw))
 
   ;; setup pub channels
-  (let [p' (-> @game ::c/players p/make-mult p/get-pubs)]
+  (let [p' (-> @game ::c/players p/make-mult)]
     (swap! game assoc ::c/players p'))
 
   ;; setup state atom
 
   (async/thread (p/start-players @game))
 
-  (async/thread (c/run-game @game)))
+  (let [g (<!! (async/thread (c/run-game @game)))]
+    (is (= 4 (-> g ::c/game-stage count)))))
+
+
 #_(go (hi))
 
 #_(c/change-game-state! ::c/started)

@@ -220,8 +220,8 @@
   (for [p (range 0 4)]
     {::name (str "player-" p)
      ::score 0
-     ::player-chan (chan-of ::player-reply-msg 4)
-     ::game->player-chan (chan-of ::game->player-msg 4)
+     ::player-chan (chan-of ::player-reply-msg 14)
+     ::game->player-chan (chan-of ::game->player-msg 14)
      ::hand []}))
 
 (defn update-hand [game {name ::name} new-hand]
@@ -449,7 +449,7 @@
 (defn valid-card
   "if card is valid return it"
   [card {hand ::hand} {suit-led ::suit-led}]
-  (info "checking card legality " card hand suit-led)
+  (info "checking card legality " card suit-led)
   (and (legal-card? suit-led hand card)
      (card-in-hand card hand)))
 
@@ -463,7 +463,6 @@
 
 (defn play-first-trick [game {:keys [::name] :as player}]
   (play-trick game player (fn [card]
-                            (info "card played is " card)
                             (assoc game
                                    ::game-stage [{::name name
                                                   ::card card}]
@@ -488,6 +487,7 @@
 
 (defn play-game [game]
   (def g (play-round game))
+  (println "Round complete")
   g)
 
 (defn ask-and-redeal
@@ -526,3 +526,4 @@
 
 (defn init-game [game]
   (deal-hand! game))
+

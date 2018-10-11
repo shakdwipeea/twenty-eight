@@ -1,8 +1,7 @@
 {:paths ["resources" "src" "dev"]
  :deps {org.clojure/clojure {:mvn/version "1.10.0-alpha7"}
         snow {;; :mvn/version "0.4.3"
-              :local/root "/home/akash/workspace/snow"
-              }
+              :local/root "/home/akash/workspace/snow"}
         failjure {:mvn/version "1.3.0"}
         com.taoensso/timbre {:mvn/version "4.10.0"}
         failjure-spec {:mvn/version "1.1.0"}
@@ -15,6 +14,7 @@
         com.cognitect/transcriptor {:mvn/version "0.1.5"}
         reagent {:mvn/version "0.8.0-alpha2"}
         stylefy {:mvn/version "1.7.0"}
+        org.immutant/web {:mvn/version "2.1.10"}
         entranceplus/re-frame {:mvn/version "0.10.6-SNAPSHOT"}}
  :mvn/repos {"jboss" {:url "https://repository.jboss.org/nexus/content/groups/public/"}
              "jitpack" {:url "https://jitpack.io"}} 
