@@ -103,13 +103,15 @@
                   ::suit suit
                   ::points (get points rank 0)}))
 
-(def playable-cards (filter (fn [{:keys [::rank]}]
-                              (or (keyword? rank) (> rank 7)))  all-cards))
 
-(def deck (for [suit suit? rank rank?]
-            {::rank rank
-             ::suit suit
-             ::points (get points rank 0)}))
+(defn is-playable? [{:keys [::rank]}]
+  (or (keyword? rank) (> rank 6)))
+
+
+(def deck (filter is-playable? (for [suit suit? rank rank?]
+                                 {::rank rank
+                                  ::suit suit
+                                  ::points (get points rank 0)})))
 
 ;;;;;;;;;;;
 ;; Specs ;;
@@ -422,6 +424,7 @@
   (error "Invalud card played by player " (-> player ::name))
   (notify-player player :invalid-card))
 
+
 (defn notify-to-play-trick [player game]
   (notify-player player
                  [:play-trick (select-keys game
@@ -431,13 +434,16 @@
 (defn receive-message [{ch ::game->player-chan}] 
   (<!! ch))
 
+
 (defn get-msg-from-player [{ch ::player-chan}]
   (<!! ch))
+
 
 (defn card-in-hand
   "if card is present in hand then get it"
   [card hand]
   (if (some #(= % card) hand) card nil))
+
 
 (defn legal-card?
   "if there is a suit-led and the player has a card of that suit
@@ -446,12 +452,14 @@
   (or (= suit suit-led)
      (not-any? #(-> % ::suit (= suit-led)) hand)))
 
+
 (defn valid-card
   "if card is valid return it"
   [card {hand ::hand} {suit-led ::suit-led}]
   (info "checking card legality " card suit-led)
   (and (legal-card? suit-led hand card)
      (card-in-hand card hand)))
+
 
 (defn play-trick [game player f]
   (notify-to-play-trick player game)
@@ -461,6 +469,7 @@
     (do (notify-invalid-play player)
         (recur game player f))))
 
+
 (defn play-first-trick [game {:keys [::name] :as player}]
   (play-trick game player (fn [card]
                             (assoc game
@@ -468,45 +477,77 @@
                                                   ::card card}]
                                    ::suit-led (-> card ::suit)))))
 
+
 (defn play-normal-trick [game {:keys [::name] :as player}]
   (play-trick game player (fn [card]
                             (update game ::game-stage conj {::name name
                                                             ::card card}))))
+
 
 (defn collect-trick [{:keys [::suit-led] :as game} player]
   (if (nil? suit-led)
     (play-first-trick game player)
     (play-normal-trick game player)))
 
-(defn play-round [game]
-  (->> game
-     ::players
-     (reduce collect-trick game)))
 
 (def g {})
 
-(defn play-game [game]
-  (def g (play-round game))
-  (println "Round complete")
-  g)
 
-(defn ask-and-redeal
-  "ask player if he wants redeal and perform it"
-  [game]
-  (let [game (change-game-state game ::asking-for-redeal)]
-    (if (ask-for-redeal? game)
-      (do (info "Dealing hand again")
-          (distribute-and-notify! game 4))
-      game)))
+(defn find-play-winner [{:keys [::game-stage ::suit-led]}]
+  {::name (->> game-stage
+             (sort-by (comp ::points ::card) >)
+             first
+             ::name)
+   ::points-collected (reduce (fn [points {{card-points ::points} ::card}]
+                                (+ points card-points)) 0 game-stage)})
 
-(defn check-for-redeal [game]
-  (info "Checking if redeal is possible")
-  (cond-> game
-    (redeal-possible? game) ask-and-redeal))
+
+
+#_(find-play-winner g)
+
+;; todo represent game-functions by a special macro
+
+#_(::hand (get-player-by-name g "player-2"))
+
+(defmacro game-func
+  "this macro is a bit of a gamble .. it allows us to control the value of
+   the symbol game and make sure it is always sane..
+   let's see how this turns out"
+  [fn-name & body]
+  `(ds/defn-spec ~(symbol fn-name)
+     {::s/args (s/cat :game ::game)
+      ::s/ret ::game}
+     [~'game]
+     ~@body))
+
+
+(game-func play-round
+           (->> game ::players (reduce collect-trick game)))
+
+
+(game-func play-game
+           (do (def g (play-round game))
+               (println "Round complete")
+               g))
+
+
+(game-func ask-and-redeal
+           (let [game (change-game-state game ::asking-for-redeal)]
+             (if (ask-for-redeal? game)
+               (do (info "Dealing hand again")
+                   (distribute-and-notify! game 4))
+               game)))
+
+(game-func check-for-redeal
+           (do (info "Checking if redeal is possible")
+               (cond-> game
+                 (redeal-possible? game) ask-and-redeal)))
+
 
 (defn print-game-key [game key tag]
   (info tag (-> game key))
   game)
+
 
 (defn run-game
   "run a game.. a game can be constructed from initial-draw"
@@ -523,6 +564,7 @@
      (print-game-key ::trump "Trump chosen is ")
      (distribute-and-notify! 4)
      play-game))
+
 
 (defn init-game [game]
   (deal-hand! game))

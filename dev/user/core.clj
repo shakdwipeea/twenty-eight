@@ -1,9 +1,7 @@
 (ns user.core
   (:require [clojure.spec.alpha :as s]
             [snow.repl :as repl]
-            [shakdwipeea.twenty-eight.app :refer [system-config]]
-            [cognitect.transcriptor :as xr :refer (check!)]
-            [eftest.runner :refer [find-tests run-tests]]))
+            [shakdwipeea.twenty-eight.app :refer [system-config]]))
 
 #_(s/check-asserts true)
 
