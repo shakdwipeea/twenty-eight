@@ -177,7 +177,10 @@
 ;; channel for game wide communication
 (s/def ::game-chan chan?)
 
-(s/def ::player (s/keys :req [::name ::score ::hand ::game->player-chan ::player-chan]))
+(s/def ::points-collected int?)
+
+(s/def ::player (s/keys :req [::name ::score ::hand ::game->player-chan ::player-chan]
+                        :opt [::points-collected]))
 
 (s/def ::players (s/* ::player))
 
@@ -214,6 +217,14 @@
      (filter #(= (-> % ::name) name))
      first))
 
+
+(defn update-player [players player-name update-fn]
+  (map (fn [p]
+         (cond-> p
+           (= (::name p) player-name) update-fn)) players))
+
+#_(update-player (-> g ::players) "player-2" #(update % ::name (fn [_] "A")))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Game state mgmt functions ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -225,15 +236,6 @@
      ::player-chan (chan-of ::player-reply-msg 14)
      ::game->player-chan (chan-of ::game->player-msg 14)
      ::hand []}))
-
-(defn update-hand [game {name ::name} new-hand]
-  (info "new-hand size " name (count new-hand))
-  (update game
-          ::players
-          #(->> %
-              (map (fn [{n' ::name :as p}]
-                     (cond-> p
-                       (= n' name) (assoc ::hand new-hand)))))))
 
 
 (defn change-game-state [{ :keys [::game-chan ::game-state] :as game} new-state]
@@ -252,6 +254,15 @@
   [{:keys [::game->player-chan ::hand ::name] :as player}]
   (info "Notifying player " name " for new hand " (count hand))
   (>!! game->player-chan [:new-hand hand]))
+
+
+(defn update-hand
+  "update hand of a player"
+  [player hand]
+  (let [p' (assoc player ::hand hand)]
+    (notify-new-hand p')
+    p'))
+
 
 (ds/defn-spec deal-cards
   {::s/args (s/cat :game ::game)
@@ -421,7 +432,7 @@
   (>!! ch msg))
 
 (defn notify-invalid-play [player]
-  (error "Invalud card played by player " (-> player ::name))
+  (error "Invalid card played by player " (-> player ::name))
   (notify-player player :invalid-card))
 
 
@@ -461,13 +472,18 @@
      (card-in-hand card hand)))
 
 
+;; (legal-card? :heart (::hand (get-player-by-name g "player-2")) (first gs))
+
+;; (valid-card (::card (first gs)) (get-player-by-name g "player-2") {::suit-led :heart})
+
+
 (defn play-trick [game player f]
   (notify-to-play-trick player game)
   (info (-> player ::name) " Player notified ")
   (if-let [card (-> player get-msg-from-player (valid-card player game))]
     (f card)
     (do (notify-invalid-play player)
-        (recur game player f))))
+        #_(recur game player f))))
 
 
 (defn play-first-trick [game {:keys [::name] :as player}]
@@ -493,17 +509,31 @@
 (def g {})
 
 
-(defn find-play-winner [{:keys [::game-stage ::suit-led]}]
-  {::name (->> game-stage
-             (sort-by (comp ::points ::card) >)
-             first
-             ::name)
-   ::points-collected (reduce (fn [points {{card-points ::points} ::card}]
-                                (+ points card-points)) 0 game-stage)})
-
-
+(defn find-play-winner [{:keys [::game-stage ::suit-led] :as g}]
+  (assoc g
+         ::round-winner-name (->> game-stage
+                                (sort-by (comp ::points ::card) >)
+                                first
+                                ::name)
+         ::points-collected (reduce (fn [points {{card-points ::points} ::card}]
+                                      (+ points card-points)) 0 game-stage)))
 
 #_(find-play-winner g)
+
+(def addf (fnil + 0))
+
+#_(addf nil 20 20)
+
+(defn update-player-points [players points-collected winning-player-name]
+  (println "Points collected by player" points-collected winning-player-name)
+  (update-player players winning-player-name (fn [p]
+                                               (update p
+                                                       ::points-collected
+                                                       #(addf % points-collected)))))
+
+
+#_(update-player-points (-> g ::players) 20 "player-1")
+
 
 ;; todo represent game-functions by a special macro
 
@@ -521,12 +551,74 @@
      ~@body))
 
 
-(game-func play-round
-           (->> game ::players (reduce collect-trick game)))
+(def game {})
 
+#_(->> g ::players (map ::points-collected) (filter some?) (apply +))
+
+(game-func play-round
+           (->> game
+              ::players
+              (reduce collect-trick game)))
+
+
+(defn arrange-players-for-turn
+  "arrange players so that lead-player-name is on top"
+  [players lead-player-name]
+  (->>  players
+      cycle
+      (drop-while #(not= (::name %) lead-player-name))
+      (take (count players))))
+
+#_(arrange-players-for-turn (-> game ::players) "player-3")
+
+(defn remove-card [hand card]
+  (filter #(not= card %) hand))
+
+
+(defn remove-played-cards [players game-stage]
+  (reduce (fn [players {:keys [::name ::card]}]
+            (update-player players name (fn [{h ::hand :as player}]
+                                          (->> card
+                                             (remove-card h)
+                                             (update-hand player)))))
+          players
+          game-stage))
+
+
+#_(remove-played-cards (-> g ::players) gs)
+
+(defn update-player-for-rounds [{:keys [::points-collected ::round-winner-name ::game-stage]
+                                 :as game}]
+  (update game ::players #(-> %
+                             (update-player-points points-collected round-winner-name)
+                             (arrange-players-for-turn round-winner-name)
+                             (remove-played-cards game-stage))))
+
+
+(defn clear-game-stage [game]
+  (assoc game ::game-stage '()))
+
+
+(defn update-game-for-rounds [game]
+  (-> game
+     play-round
+     find-play-winner
+     update-player-for-rounds
+     clear-game-stage))
+
+
+#_(update-player-for-rounds g)
+
+(def game g)
+
+(game-func round-controller
+           (let [num-rounds (-> game ::players first ::hand)]
+             (reduce (fn [g _] (update-game-for-rounds g)) game num-rounds)))
+
+#_(-> g ::game-stage)
 
 (game-func play-game
-           (do (def g (play-round game))
+           (do (def g (round-controller game))
                (println "Round complete")
                g))
 
@@ -538,6 +630,7 @@
                    (distribute-and-notify! game 4))
                game)))
 
+
 (game-func check-for-redeal
            (do (info "Checking if redeal is possible")
                (cond-> game
@@ -545,7 +638,7 @@
 
 
 (defn print-game-key [game key tag]
-  (info tag (-> game key))
+  (info tag (-> game key) (-> game ::deck count))
   game)
 
 
@@ -568,4 +661,3 @@
 
 (defn init-game [game]
   (deal-hand! game))
-

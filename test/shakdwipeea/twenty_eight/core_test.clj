@@ -44,8 +44,7 @@
   (async/thread (p/start-players @game))
 
   (let [g (<!! (async/thread (c/run-game @game)))]
-    (is (= 4 (-> g ::c/game-stage count)))))
-
+    (is (= 28 (->> g ::c/players (map ::c/points-collected) (filter some?) (apply +))))))
 
 #_(go (hi))
 
