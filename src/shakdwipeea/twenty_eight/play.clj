@@ -45,20 +45,25 @@
 
 #_(find-first #{:abc}  #{:abc :def})
 
+(defn get-suit-card [hand suit]
+  (->> hand
+     (filter (fn [{s ::c/suit}]
+               (= s suit)))
+     first))
 
-(defn choose-card [suit-led hand]
-  (info "Choosing card suit-led: " suit-led " hand suits " (->> hand
-                                                              (map ::c/suit)
-                                                              (string/join ",")))
-  (or (first (filter (partial c/legal-card? suit-led hand) hand))
-     (rand-nth hand)))
+(defn choose-card [suit-led {trump ::c/trump} hand]
+  (info "Trump is " trump "Choosing card suit-led: " suit-led " hand suits " (->> hand
+                                                                                (map ::c/suit)
+                                                                                (string/join ",")))
+  (if-let [card  (and (some? suit-led)
+                    (first (filter (partial c/legal-card? suit-led hand) hand)))]
+    card
+    (if (some? trump)
+      (or (do (info "checking if")
+             (get-suit-card hand (::c/trump-suit trump)))
+         (rand-nth hand))
+      :expose-trump)))
 
-
-(defn play-card [{hand ::c/hand :as p}]
-  (handle-msg! p
-               :play-trick
-               (fn [_ {suit-led ::c/suit-led}]
-                 (player-msg p (choose-card suit-led hand)))))
 
 
 
@@ -104,32 +109,34 @@
 
 (def game (atom {}))
 
-(defn play-card! [player suit-led]
+(defn play-card! [player suit-led game]
   (->> player
      ::c/hand
-     (choose-card suit-led)
+     (choose-card suit-led game)
      (player-msg player)))
 
 
-(defn player-actions [player msg]
+(defn player-actions [{:keys [::c/player ::c/game] :as state} msg]
   (info "Trying to conform now")
   (let [[tag _] (s/conform ::c/game->player-msg msg)]
     (info "Msg is " msg " tag is " tag)
     (case tag
       
       :redeal-msg (do (c/reply-for-redeal! player false)
-                      player)
+                      state)
       
       :bid-msg (do (c/perform-bid! player 16)
-                   player)
+                   state)
       
-      :new-hand (assoc player ::c/hand (second msg))
+      :new-hand (assoc-in state [::c/player ::c/hand] (second msg))
       
       :choose-trump (do (c/player-choose-trump! player :diamond)
-                        player)
+                        state)
       
-      :play-trick (do (play-card! player (-> msg second ::c/suit-led))
-                      player)
+      :play-trick (do (play-card! player (-> msg second ::c/suit-led) game)
+                      state)
+
+      :trump-exposed (assoc-in state [::c/game ::c/trump] msg)
       
       (do (error "unknown msg from game " msg ".. waiting for next msg")
           player))))
@@ -138,16 +145,17 @@
 #_(partial reduce player-actions player)
 
 
-(defn start-player [{mult ::game->player-mult name ::c/name :as player}]
+(defn start-player [{{mult ::game->player-mult name ::c/name} ::c/player :as state}]
   (let [game-dup-chan (async/chan sz )]
     (async/tap mult game-dup-chan)
     (info "Starting player " name)
-    (async/reduce player-actions player game-dup-chan)))
+    (async/reduce player-actions state game-dup-chan)))
 
 
 (defn start-players [game]
   (doseq [p (-> game ::c/players)]
-    (async/thread (start-player p))))
+    (async/thread (start-player {::c/player p
+                                 ::c/game game}))))
 
 
 #_(defn complete-bidding [game]

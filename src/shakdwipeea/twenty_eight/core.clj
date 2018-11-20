@@ -59,6 +59,8 @@
 ;; (def c1 (chan))
 ;; (def c2 (pipe-trans c1 (filter even?)))
 
+(def find-first (comp first filter))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Trump cards secret management ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -131,15 +133,13 @@
 
 (s/def ::trump-suit ::suit)
 
-(s/def ::trump-ref-id #(-> % get-trump-suit some?))
-
 ;; if trump is exposed then we can directly contain the trump suit
 ;; o/w we store a reference id to the trump-suit-store atom defined above
 (defmulti trump-exposed ::trump-exposed)
 (defmethod trump-exposed true [_]
   (s/keys :req [::trump-exposed ::trump-suit]))
 (defmethod trump-exposed false [_]
-  (s/keys :req [::trump-exposed ::trump-ref-id]))
+  (s/keys :req [::trump-exposed]))
 
 (s/def ::trump (s/multi-spec trump-exposed ::trump-exposed))
 
@@ -149,6 +149,7 @@
                                 :bid-msg (s/tuple #{:bid} ::bid-value)
                                 :choose-trump (s/tuple #{:choose-trump} ::name)
                                 :new-hand (s/tuple #{:new-hand} ::hand)
+                                :trump-exposed ::trump
                                 :play-trick (s/tuple #{:play-trick}
                                                      (s/keys :req [::trump]
                                                              :opt [::game-stage ::suit-led]))))
@@ -159,7 +160,9 @@
                                 :bid-reply (s/keys :req [::bid-value])
                                 :trump ::suit
                                 :trick ::card
+                                :expose-trump #{:expose-trump}
                                 :trump-trick (s/tuple #{:trump} ::card)))
+
 
 (s/def ::control #{::state-change})
 
@@ -401,7 +404,7 @@
   (info "Asking " name " for trump card.")
   (>!! game->player-chan [:choose-trump name])
   (info "Now waiting for response " name)
-  {::trump-exposed true
+  {::trump-exposed false
    ::trump-suit (<!! player-chan)})
 
 
@@ -476,14 +479,32 @@
 
 ;; (valid-card (::card (first gs)) (get-player-by-name g "player-2") {::suit-led :heart})
 
+(declare play-trick)
+
+(defn notify-trump-exposed [{:keys [::players ::trump]}]
+  (doseq [p players]
+    (notify-player p trump)))
+
 
 (defn play-trick [game player f]
   (notify-to-play-trick player game)
   (info (-> player ::name) " Player notified ")
-  (if-let [card (-> player get-msg-from-player (valid-card player game))]
-    (f card)
-    (do (notify-invalid-play player)
-        #_(recur game player f))))
+  (let [[tag val] (->> player
+                     get-msg-from-player
+                     (s/conform ::player-reply-msg))]
+    (info "tag is " tag)
+    (case tag
+      :expose-trump (let [g' (assoc-in game [::trump ::trump-exposed] true)]
+                      (notify-trump-exposed g')
+                      (recur g' player f))
+      
+      :trick (if (valid-card val player game)
+               (f val)
+               (do (notify-invalid-play player)
+                   (recur game player f)))
+
+      ;; todo add notify-error for player
+      (notify-invalid-play player))))
 
 
 (defn play-first-trick [game {:keys [::name] :as player}]
@@ -508,12 +529,30 @@
 
 (def g {})
 
+(defn get-max-point-card [game-stage]
+  (doseq [c (map ::card game-stage)]
+    (info "final card " c))
+  (->> game-stage
+     (sort-by (comp ::points ::card) >)
+     first))
 
-(defn find-play-winner [{:keys [::game-stage ::suit-led] :as g}]
+(defn find-winner-on-stage [game-stage suit-led {:keys [::trump-exposed ::trump-suit] :as t}]
+  (if-let [trumps (when trump-exposed
+                    (seq (filter #(= (-> % ::card ::suit)
+                                     trump-suit) game-stage)))]
+    (get-max-point-card trumps)
+    (do (info "no trumps suit-led " suit-led (get-max-point-card game-stage))
+        (def gs game-stage)
+        (->> game-stage
+           (filter (fn [{{s ::suit} ::card}]
+                     (= s suit-led)))
+           get-max-point-card))))
+
+
+(defn find-play-winner [{:keys [::game-stage ::suit-led ::trump] :as g}]
   (assoc g
-         ::round-winner-name (->> game-stage
-                                (sort-by (comp ::points ::card) >)
-                                first
+         ::round-winner-name (-> game-stage
+                                (find-winner-on-stage suit-led trump)
                                 ::name)
          ::points-collected (reduce (fn [points {{card-points ::points} ::card}]
                                       (+ points card-points)) 0 game-stage)))
@@ -595,8 +634,8 @@
                              (remove-played-cards game-stage))))
 
 
-(defn clear-game-stage [game]
-  (assoc game ::game-stage '()))
+(defn clear-round-state [game]
+  (dissoc (assoc game ::game-stage '()) ::suit-led))
 
 
 (defn update-game-for-rounds [game]
@@ -604,7 +643,7 @@
      play-round
      find-play-winner
      update-player-for-rounds
-     clear-game-stage))
+     clear-round-state))
 
 
 #_(update-player-for-rounds g)

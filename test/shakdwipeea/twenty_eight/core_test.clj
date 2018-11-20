@@ -30,8 +30,6 @@
 
 (def players (-> @game ::c/players))
 
-(c/update-hand @game (first players) [])
-
 (deftest game-sim-test 
   (reset! game (c/initial-draw))
 
