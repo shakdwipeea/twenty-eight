@@ -188,7 +188,7 @@
 (s/def ::players (s/* ::player))
 
 ;; current board on which cards are being played
-(s/def ::game-stage (s/* (s/keys :req [::name ::card])))
+(s/def ::game-stage (s/* (s/keys :req [::name ::card ::trump-exposed])))
 
 ;; suit currently being led
 (s/def ::suit-led ::suit)
@@ -507,18 +507,20 @@
       (notify-invalid-play player))))
 
 
-(defn play-first-trick [game {:keys [::name] :as player}]
+(defn play-first-trick [{t ::trump-exposed :as game} {:keys [::name] :as player}]
   (play-trick game player (fn [card]
                             (assoc game
                                    ::game-stage [{::name name
-                                                  ::card card}]
+                                                  ::card card
+                                                  ::trump-exposed t}]
                                    ::suit-led (-> card ::suit)))))
 
 
-(defn play-normal-trick [game {:keys [::name] :as player}]
+(defn play-normal-trick [{t ::trump-exposed :as game} {:keys [::name] :as player}]
   (play-trick game player (fn [card]
                             (update game ::game-stage conj {::name name
-                                                            ::card card}))))
+                                                            ::card card
+                                                            ::trump-exposed t}))))
 
 
 (defn collect-trick [{:keys [::suit-led] :as game} player]
@@ -538,8 +540,9 @@
 
 (defn find-winner-on-stage [game-stage suit-led {:keys [::trump-exposed ::trump-suit] :as t}]
   (if-let [trumps (when trump-exposed
-                    (seq (filter #(= (-> % ::card ::suit)
-                                     trump-suit) game-stage)))]
+                    (seq (filter (fn [{{suit ::suit t ::trump-exposed} ::card}]
+                                   (and t (= suit trump-suit)))
+                                 game-stage)))]
     (get-max-point-card trumps)
     (do (info "no trumps suit-led " suit-led (get-max-point-card game-stage))
         (def gs game-stage)
