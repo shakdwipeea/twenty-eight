@@ -1,4 +1,4 @@
-# twenty-eight
+# twenty-eight [![CircleCI](https://circleci.com/gh/shakdwipeea/twenty-eight.svg?style=svg)](https://circleci.com/gh/shakdwipeea/twenty-eight)
 
 ## Prerequisites
 
